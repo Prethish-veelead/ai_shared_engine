@@ -1,0 +1,13 @@
+# Model + price registry. Edit prices here when Azure changes them — no code.
+# Prices are USD per 1,000,000 tokens (example values; verify against Azure).
+models:
+  gpt-4o-mini:
+    input_per_1m: 0.15
+    output_per_1m: 0.60
+  gpt-4o:
+    input_per_1m: 2.50
+    output_per_1m: 10.00
+  text-embedding-3-small:
+    input_per_1m: 0.02
+  text-embedding-3-large:
+    input_per_1m: 0.13

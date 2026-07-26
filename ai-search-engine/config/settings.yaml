@@ -1,0 +1,4 @@
+# Global defaults (non-secret). Secrets go in .env, never here.
+defaults:
+  top_k: 5
+  request_timeout_seconds: 60

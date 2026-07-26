@@ -1,0 +1,43 @@
+# --- Secrets / environment ---
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# --- Node / Next.js (admin-portal, bot-ui) ---
+node_modules/
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.eslintcache
+
+# --- Python (ai-search-engine) ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Docker ---
+*.pid
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Only admin-portal, ai-search-engine, bot-ui, docs are meant to be pushed ---
+/e2e-test/
+/.claude/
