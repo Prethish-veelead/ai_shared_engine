@@ -24,7 +24,7 @@ class VectorStoreConfig(BaseModel):
 
 class ModelsConfig(BaseModel):
     llm: str = "gpt-4o-mini"
-    embedding: str = "text-embedding-3-small"
+    embedding: str = "bge-base-en-v1.5"
 
 
 class PromptConfig(BaseModel):

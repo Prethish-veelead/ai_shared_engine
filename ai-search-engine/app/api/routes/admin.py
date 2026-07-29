@@ -4,7 +4,7 @@ exposing publicly (see core/security.py).
 """
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 
 from app.api.deps import get_vector_store, require_admin
 from sqlalchemy import select
@@ -22,6 +22,7 @@ from app.db.repositories import user_repository as users_repo
 from app.db.repositories.chat_repository import search_chats
 from app.db.repositories.log_repository import search_events
 from app.db.session import get_session
+from app.workers.sync_scheduler import sync_one_bot
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -38,7 +39,7 @@ def list_bots() -> list[dict]:
     return [{
         "id": b.id, "name": b.name, "route": b.route, "enabled": b.enabled,
         "sharepointSite": b.sharepoint.site_url,
-        "sharepointLibrary": b.sharepoint.libraries[0] if b.sharepoint.libraries else "",
+        "sharepointLibraries": b.sharepoint.libraries,
         "qdrantCollection": b.vectorstore.collection,
         "llmModel": b.models.llm,
         "embeddingModel": b.models.embedding,
@@ -111,7 +112,39 @@ def list_available_models() -> dict:
         if not name:
             continue
         (embedding if "embedding" in model else llm).append(name)
+
+    # Azure OpenAI only lists ITS OWN deployments - the locally-run embedding
+    # model (when embedding_backend=local) isn't an Azure deployment, so it
+    # would never appear here otherwise, and the form couldn't offer the
+    # model that's actually configured on every bot. Use the bare model name
+    # (strip the "BAAI/" org prefix) - that's what bot YAMLs and usage_logs
+    # store; LOCAL_EMBEDDING_MODEL's full HF id is only needed to load it.
+    if s.embedding_backend == "local":
+        local_name = s.local_embedding_model.split("/")[-1]
+        if local_name not in embedding:
+            embedding.append(local_name)
+
     return {"llm": sorted(llm), "embedding": sorted(embedding)}
+
+
+@router.get("/sharepoint/libraries")
+def sharepoint_libraries(site_url: str, tenant: str = "veelead-development") -> list[str]:
+    """List the real document libraries at a SharePoint site - powers the Bot
+    Management form's library picker so admins choose from what actually
+    exists instead of typing a name that might not match (this is exactly
+    the bug that silently broke the hr bot's sync earlier: the configured
+    library name didn't match the site's real library name)."""
+    from app.ingestion.sharepoint_client import SharePointClient
+    from app.ingestion.tenant_resolver import resolve_tenant
+
+    creds = resolve_tenant(tenant)
+    client = SharePointClient(creds.tenant_id, creds.client_id, creds.client_secret)
+    try:
+        site_id = client.resolve_site(site_url)
+        drives = client.resolve_drives(site_id)
+    except Exception as exc:
+        raise UpstreamError(f"Failed to resolve SharePoint site/libraries: {exc}") from exc
+    return sorted(drives.keys())
 
 
 @router.post("/bots")
@@ -133,9 +166,32 @@ def toggle_bot(bot_id: str, enabled: bool) -> dict:
 
 
 @router.delete("/bots/{bot_id}")
-def delete_bot(bot_id: str) -> dict:
-    config_writer.delete_bot(bot_id)
+def delete_bot(bot_id: str, db: Session = Depends(get_session)) -> dict:
+    # Also drops the bot's Qdrant collection and sync_state rows - see
+    # config_writer.delete_bot() for what's intentionally left alone (cost/
+    # audit history in chat_logs/usage_logs).
+    config_writer.delete_bot(bot_id, vector_store=get_vector_store(), db=db)
     return {"deleted": bot_id}
+
+
+@router.post("/bots/{bot_id}/sync")
+def sync_bot_now(bot_id: str, background_tasks: BackgroundTasks) -> dict:
+    """Trigger an incremental SharePoint sync for one bot immediately, instead
+    of waiting for its cron schedule (indexing.schedule). Runs in the
+    background - poll GET /admin/index-status to see doc/chunk counts update."""
+    registry.get_any(bot_id)   # raises BotNotFoundError (404) for an unknown id; disabled is fine
+    background_tasks.add_task(sync_one_bot, bot_id, full=False)
+    return {"status": "sync_started", "bot_id": bot_id}
+
+
+@router.post("/bots/{bot_id}/reindex")
+def reindex_bot_now(bot_id: str, background_tasks: BackgroundTasks) -> dict:
+    """Force a full re-crawl of one bot: resets its saved delta token first,
+    so every document is re-fetched and re-chunked even if SharePoint's delta
+    query would otherwise report nothing changed. Runs in the background."""
+    registry.get_any(bot_id)
+    background_tasks.add_task(sync_one_bot, bot_id, full=True)
+    return {"status": "reindex_started", "bot_id": bot_id}
 
 
 # ---------- usage dashboard ----------

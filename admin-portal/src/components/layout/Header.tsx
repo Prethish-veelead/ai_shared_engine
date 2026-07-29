@@ -17,20 +17,20 @@ export function Header() {
   };
 
   return (
-    <header className="flex h-16 shrink-0 items-center justify-between border-b bg-white px-6">
+    <header className="flex h-16 shrink-0 items-center justify-between border-b border-navy-deep bg-navy text-white px-6">
       <div className="flex-1">
         {/* Placeholder for global search or breadcrumbs if needed */}
       </div>
       <div className="flex items-center space-x-4">
         {isAuthenticated && accounts.length > 0 ? (
           <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2 text-sm font-medium text-gray-700">
-              <UserCircle className="h-5 w-5 text-blue-600" />
+            <div className="flex items-center gap-2 text-sm font-medium text-white">
+              <UserCircle className="h-5 w-5 text-accent" />
               <span>{accounts[0].name || accounts[0].username}</span>
             </div>
             <button
               onClick={handleLogout}
-              className="flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-900 transition-colors"
+              className="flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium text-gray-300 hover:bg-navy-deep hover:text-white transition-colors"
             >
               <LogOut className="h-4 w-4" />
               Sign Out
@@ -39,7 +39,7 @@ export function Header() {
         ) : (
           <button
             onClick={handleLogin}
-            className="flex items-center gap-2 rounded-full border border-blue-600 bg-blue-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
+            className="flex items-center gap-2 rounded-full border border-orange bg-orange px-4 py-1.5 text-sm font-medium text-white hover:bg-orange-hover transition-colors"
           >
             <LogIn className="h-4 w-4" />
             <span>Sign In (Entra ID)</span>

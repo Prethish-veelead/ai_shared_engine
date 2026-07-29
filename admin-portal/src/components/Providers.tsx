@@ -58,7 +58,7 @@ export function Providers({ children }: { children: ReactNode }) {
               <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-100">
                 <AlertTriangle className="h-6 w-6 text-red-600" />
               </div>
-              <h2 className="mb-2 text-xl font-bold text-gray-900">Admin Access Required</h2>
+              <h2 className="mb-2 text-xl font-bold text-navy">Admin Access Required</h2>
               <p className="mb-6 text-sm text-gray-500">
                 You are signed in, but your account does not have administrator privileges for this portal.
               </p>

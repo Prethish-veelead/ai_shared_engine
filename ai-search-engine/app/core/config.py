@@ -37,7 +37,9 @@ class Settings(BaseSettings):
 
     # --- Which implementations to use (swap without code changes) ---
     vector_backend: str = "qdrant"          # qdrant | azure_search
-    llm_backend: str = "azure_openai"        # azure_openai | ...
+    llm_backend: str = "azure_openai"        # azure_openai | ... (chat only)
+    embedding_backend: str = "azure_openai"  # azure_openai | local
+    local_embedding_model: str = "BAAI/bge-base-en-v1.5"  # used when embedding_backend=local
 
     # --- Entra ID auth (Job B: user sign-in) ---
     auth_enabled: bool = True                # False = local dev bypass (see below)

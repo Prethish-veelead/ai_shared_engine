@@ -17,7 +17,7 @@ const AVATAR_COLORS = [
 ];
 
 const BOT_COLORS = [
-  "bg-blue-50 text-blue-700 ring-blue-700/10",
+  "bg-info text-blue-700 ring-orange/10",
   "bg-emerald-50 text-emerald-700 ring-emerald-700/10",
   "bg-amber-50 text-amber-700 ring-amber-700/10",
   "bg-violet-50 text-violet-700 ring-violet-700/10",
@@ -42,14 +42,23 @@ export default function HistoryPage() {
   const [history, setHistory] = useState<ChatHistoryRow[]>([]);
   const [bots, setBots] = useState<Bot[]>([]);
   const [loading, setLoading] = useState(true);
+  const [botId, setBotId] = useState("");
+  const [keywordInput, setKeywordInput] = useState("");
+  const [keyword, setKeyword] = useState("");
   const authReady = useAuthReady();
+
+  // Debounce the search box so it doesn't re-fetch on every keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setKeyword(keywordInput), 400);
+    return () => clearTimeout(t);
+  }, [keywordInput]);
 
   useEffect(() => {
     if (!authReady) return;
     async function loadData() {
       try {
         const [hist, bts] = await Promise.all([
-          api.getChatHistory(),
+          api.getChatHistory({ bot_id: botId || undefined, keyword: keyword || undefined }),
           api.getBots()
         ]);
         setHistory(hist);
@@ -61,7 +70,7 @@ export default function HistoryPage() {
       }
     }
     loadData();
-  }, [authReady]);
+  }, [authReady, botId, keyword]);
 
   if (loading) return <div className="flex h-full items-center justify-center">Loading chat history...</div>;
 
@@ -71,7 +80,7 @@ export default function HistoryPage() {
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-gray-900">Chat History</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-navy">Chat History</h1>
           <p className="text-sm text-gray-500">Search and audit conversations across bots.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -79,11 +88,17 @@ export default function HistoryPage() {
             <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-gray-400" />
             <input
               type="text"
+              value={keywordInput}
+              onChange={(e) => setKeywordInput(e.target.value)}
               placeholder="Search keyword..."
-              className="pl-9 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="pl-9 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange"
             />
           </div>
-          <select className="rounded-md border border-gray-300 px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <select
+            value={botId}
+            onChange={(e) => setBotId(e.target.value)}
+            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-orange"
+          >
             <option value="">All Bots</option>
             {bots.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
@@ -114,7 +129,7 @@ export default function HistoryPage() {
                         {initialsFor(label)}
                       </div>
                       <div className="min-w-0">
-                        <div className="text-sm font-medium text-gray-900 truncate" title={label}>{label}</div>
+                        <div className="text-sm font-medium text-navy truncate" title={label}>{label}</div>
                         <span className={cn("mt-1 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset", colorFor(row.bot_id, BOT_COLORS))}>
                           {botName(row.bot_id)}
                         </span>
@@ -122,7 +137,7 @@ export default function HistoryPage() {
                     </div>
                   </td>
                   <td className="px-6 py-4">
-                    <div className="text-sm font-medium text-gray-900 mb-1">Q: {row.question}</div>
+                    <div className="text-sm font-medium text-navy mb-1">Q: {row.question}</div>
                     <div className="text-sm text-gray-600 line-clamp-2">A: {row.answer}</div>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-gray-500">

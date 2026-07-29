@@ -66,9 +66,7 @@ def get_vector_store() -> VectorStore:
     raise ConfigError(f"Unknown vector_backend '{s.vector_backend}'")
 
 
-@lru_cache
-def get_llm_client() -> LLMClient:
-    s = get_settings()
+def _build_chat_client(s) -> AzureOpenAIClient:
     if s.llm_backend == "azure_openai":
         if not (s.azure_openai_endpoint and s.azure_openai_api_key):
             raise ConfigError("Azure OpenAI endpoint/key not configured (.env)")
@@ -78,6 +76,20 @@ def get_llm_client() -> LLMClient:
             api_version=s.azure_openai_api_version,
         )
     raise ConfigError(f"Unknown llm_backend '{s.llm_backend}'")
+
+
+@lru_cache
+def get_llm_client() -> LLMClient:
+    s = get_settings()
+    chat_client = _build_chat_client(s)
+
+    if s.embedding_backend == "azure_openai":
+        return chat_client  # AzureOpenAIClient handles both chat and embed itself
+    if s.embedding_backend == "local":
+        from app.llm.hybrid import HybridLLMClient
+        from app.llm.local_embedding import LocalEmbeddingModel
+        return HybridLLMClient(chat_client, LocalEmbeddingModel(s.local_embedding_model))
+    raise ConfigError(f"Unknown embedding_backend '{s.embedding_backend}'")
 
 
 @lru_cache

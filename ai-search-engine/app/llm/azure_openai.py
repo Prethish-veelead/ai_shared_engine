@@ -42,7 +42,9 @@ class AzureOpenAIClient(LLMClient):
             model=model,
         )
 
-    def embed(self, texts: list[str], model: str) -> EmbedResult:
+    def embed(self, texts: list[str], model: str, is_query: bool = False) -> EmbedResult:
+        # Azure OpenAI embeddings have no query/passage distinction - is_query
+        # is part of the shared LLMClient contract but unused here.
         try:
             resp = self._client.embeddings.create(model=self._deployment(model), input=texts)
         except Exception as exc:

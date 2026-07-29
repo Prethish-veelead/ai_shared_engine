@@ -51,6 +51,15 @@ class BotRegistry:
             raise BotNotFoundError(f"Bot '{bot_id}' is disabled")
         return bot
 
+    def get_any(self, bot_id: str) -> BotConfig:
+        """Like get(), but doesn't reject a disabled bot. For admin actions
+        (sync/reindex) that should still work on a disabled bot's config -
+        only an unknown id is an error."""
+        bot = self._bots.get(bot_id)
+        if bot is None:
+            raise BotNotFoundError(f"No bot with id '{bot_id}'")
+        return bot
+
     def all(self) -> list[BotConfig]:
         return list(self._bots.values())
 

@@ -16,7 +16,7 @@ export interface Bot {
   enabled: boolean;
   // Additional fields for the form that might not exist in the basic list yet
   sharepointSite?: string;
-  sharepointLibrary?: string;
+  sharepointLibraries?: string[];
   qdrantCollection?: string;
   llmModel?: string;
   embeddingModel?: string;
@@ -79,6 +79,10 @@ export interface CostSummary {
   total_cost: number;
   embedding_cost: number;
   llm_cost: number;
+  llm_input_cost: number;
+  llm_output_cost: number;
+  input_tokens: number;
+  output_tokens: number;
 }
 
 export interface CostByUser {
@@ -227,14 +231,14 @@ function toBotConfigPayload(botId: string, data: Partial<Bot>) {
     sharepoint: {
       tenant: DEFAULT_SHAREPOINT_TENANT,
       site_url: data.sharepointSite,
-      libraries: data.sharepointLibrary ? [data.sharepointLibrary] : [],
+      libraries: data.sharepointLibraries || [],
     },
     vectorstore: {
       collection: data.qdrantCollection || botId,
     },
     models: {
       llm: data.llmModel || "gpt-4o-mini",
-      embedding: data.embeddingModel || "text-embedding-3-small",
+      embedding: data.embeddingModel || "bge-base-en-v1.5",
     },
     prompt: {
       system: data.systemPrompt || "You are a helpful assistant.",
@@ -272,7 +276,7 @@ export const api = {
 
   async getAvailableModels(): Promise<AvailableModels> {
     if (USE_MOCKS) {
-      return { llm: ["gpt-4o-mini", "gpt-4o"], embedding: ["text-embedding-3-small"] };
+      return { llm: ["gpt-4o-mini", "gpt-4o"], embedding: ["bge-base-en-v1.5"] };
     }
     // Real deployments on the connected Azure OpenAI resource (app/api/routes/
     // admin.py list_available_models) - replaces the old hardcoded dropdown
@@ -290,6 +294,15 @@ export const api = {
     // Read live from the vector store (app/api/routes/admin.py index_status) -
     // not persisted in Postgres, so this is always current as of the last sync.
     return fetcher<IndexStatus[]>(`/admin/index-status${buildQuery({ bot_id: botId })}`);
+  },
+
+  async getSharePointLibraries(siteUrl: string): Promise<string[]> {
+    if (USE_MOCKS) return ["HR Knowledge Base", "Policies", "Onboarding"];
+    // Live query against the real SharePoint site (app/api/routes/admin.py
+    // sharepoint_libraries) - lets the form offer a real dropdown instead of
+    // a free-text field that can silently typo-mismatch the real library name
+    // (exactly what broke the hr bot's sync earlier this session).
+    return fetcher<string[]>(`/admin/sharepoint/libraries${buildQuery({ site_url: siteUrl, tenant: DEFAULT_SHAREPOINT_TENANT })}`);
   },
 
   async getChatHistory(params?: { bot_id?: string; user_id?: string; keyword?: string; limit?: number }): Promise<ChatHistoryRow[]> {
@@ -357,14 +370,16 @@ export const api = {
     return { success: true };
   },
 
-  // NOTE: the backend has no per-bot reindex HTTP endpoint. It only has
-  // POST /admin/bots/reload (re-reads all YAML configs from disk) and an
-  // offline CLI script (scripts/reindex_bot.py) that triggers an actual
-  // SharePoint resync. Neither is a drop-in match for "reindex this one bot
-  // over HTTP", so this stays mocked until that endpoint is added.
-  async reindexBot(botId: string): Promise<{ success: boolean }> {
-    console.warn(`reindexBot(${botId}): no backend endpoint exists yet, returning mock success`);
-    return { success: true };
+  // Both run in the background on the API side; the caller polls
+  // getIndexStatus() to see doc/chunk counts and last_sync_at update.
+  async syncBotNow(botId: string): Promise<{ status: string; bot_id: string }> {
+    if (USE_MOCKS) return { status: "sync_started", bot_id: botId };
+    return fetcher<{ status: string; bot_id: string }>(`/admin/bots/${botId}/sync`, { method: "POST" });
+  },
+
+  async reindexBot(botId: string): Promise<{ status: string; bot_id: string }> {
+    if (USE_MOCKS) return { status: "reindex_started", bot_id: botId };
+    return fetcher<{ status: string; bot_id: string }>(`/admin/bots/${botId}/reindex`, { method: "POST" });
   },
 
   async getUsageSummary(params?: TimeFilterParams): Promise<UsageSummary> {
@@ -409,7 +424,11 @@ export const api = {
 
   async getCostSummary(params?: TimeFilterParams): Promise<CostSummary> {
     if (USE_MOCKS) {
-      return { total_cost: 210.45, embedding_cost: 30.15, llm_cost: 180.30 };
+      return {
+        total_cost: 210.45, embedding_cost: 30.15, llm_cost: 180.30,
+        llm_input_cost: 120.10, llm_output_cost: 60.20,
+        input_tokens: 800000, output_tokens: 200000,
+      };
     }
     return fetcher<CostSummary>(`/admin/cost/summary${buildQuery(params)}`);
   },

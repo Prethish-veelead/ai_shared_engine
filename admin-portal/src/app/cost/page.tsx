@@ -24,17 +24,19 @@ export default function CostPage() {
   const [byModel, setByModel] = useState<CostByModel[]>([]);
   const [byUser, setByUser] = useState<CostByUser[]>([]);
   const [loading, setLoading] = useState(true);
+  const [period, setPeriod] = useState("last_30_days");
   const authReady = useAuthReady();
 
   useEffect(() => {
     if (!authReady) return;
     async function loadData() {
       try {
+        const params = { period: period || undefined };
         const [sum, bot, model, user] = await Promise.all([
-          api.getCostSummary(),
-          api.getCostByBot(),
-          api.getCostByModel(),
-          api.getCostByUser()
+          api.getCostSummary(params),
+          api.getCostByBot(params),
+          api.getCostByModel(params),
+          api.getCostByUser(params)
         ]);
         setSummary(sum);
         setByBot(bot);
@@ -47,7 +49,7 @@ export default function CostPage() {
       }
     }
     loadData();
-  }, [authReady]);
+  }, [authReady, period]);
 
   if (loading || !summary) return <div className="flex h-full items-center justify-center">Loading cost data...</div>;
 
@@ -60,34 +62,45 @@ export default function CostPage() {
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-gray-900">Cost Dashboard</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-navy">Cost Dashboard</h1>
           <p className="text-sm text-gray-500">Analyze spending by bot, model, and user.</p>
         </div>
-        <select className="rounded-md border border-gray-300 px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
-          <option value="30d">Last 30 Days</option>
+        <select
+          value={period}
+          onChange={(e) => setPeriod(e.target.value)}
+          className="rounded-md border border-gray-300 px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-orange"
+        >
+          <option value="last_30_days">Last 30 Days</option>
           <option value="this_month">This Month</option>
-          <option value="last_month">Last Month</option>
+          <option value="">All Time</option>
         </select>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-lg border bg-white p-6 shadow-sm">
           <p className="text-sm font-medium text-gray-500">Total Cost</p>
-          <h3 className="text-3xl font-bold text-gray-900 mt-2">${summary.total_cost.toFixed(2)}</h3>
+          <h3 className="text-3xl font-bold text-navy mt-2">${summary.total_cost.toFixed(2)}</h3>
         </div>
         <div className="rounded-lg border bg-white p-6 shadow-sm">
-          <p className="text-sm font-medium text-gray-500">LLM Cost</p>
-          <h3 className="text-3xl font-bold text-gray-900 mt-2">${summary.llm_cost.toFixed(2)}</h3>
+          <p className="text-sm font-medium text-gray-500">Input Tokens</p>
+          <h3 className="text-2xl font-bold text-navy mt-2">${summary.llm_input_cost.toFixed(4)}</h3>
+          <p className="text-xs text-gray-400 mt-1">{summary.input_tokens.toLocaleString()} tokens</p>
+        </div>
+        <div className="rounded-lg border bg-white p-6 shadow-sm">
+          <p className="text-sm font-medium text-gray-500">Output Tokens</p>
+          <h3 className="text-2xl font-bold text-navy mt-2">${summary.llm_output_cost.toFixed(4)}</h3>
+          <p className="text-xs text-gray-400 mt-1">{summary.output_tokens.toLocaleString()} tokens</p>
         </div>
         <div className="rounded-lg border bg-white p-6 shadow-sm">
           <p className="text-sm font-medium text-gray-500">Embedding Cost</p>
-          <h3 className="text-3xl font-bold text-gray-900 mt-2">${summary.embedding_cost.toFixed(2)}</h3>
+          <h3 className="text-3xl font-bold text-navy mt-2">${summary.embedding_cost.toFixed(2)}</h3>
+          <p className="text-xs text-gray-400 mt-1">$0 = local model, no API cost</p>
         </div>
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <div className="rounded-lg border bg-white p-6 shadow-sm">
-          <h3 className="text-base font-semibold text-gray-900 mb-4">Cost vs Type</h3>
+          <h3 className="text-base font-semibold text-navy mb-4">Cost vs Type</h3>
           <div className="h-64">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
@@ -101,7 +114,7 @@ export default function CostPage() {
         </div>
 
         <div className="rounded-lg border bg-white p-6 shadow-sm">
-          <h3 className="text-base font-semibold text-gray-900 mb-4">Cost by Model</h3>
+          <h3 className="text-base font-semibold text-navy mb-4">Cost by Model</h3>
           <div className="h-64">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={byModel} layout="vertical" margin={{ left: 50 }}>
@@ -118,7 +131,7 @@ export default function CostPage() {
 
       <div className="rounded-lg border bg-white shadow-sm overflow-hidden">
         <div className="border-b px-6 py-4 bg-gray-50">
-          <h3 className="font-semibold text-gray-900">Top Users by Cost</h3>
+          <h3 className="font-semibold text-navy">Top Users by Cost</h3>
         </div>
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
@@ -132,10 +145,10 @@ export default function CostPage() {
           <tbody className="bg-white divide-y divide-gray-200">
             {byUser.map(user => (
               <tr key={user.user_id}>
-                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{user.email || user.user_id}</td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-navy">{user.email || user.user_id}</td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-right">{user.requests}</td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-right">{user.tokens.toLocaleString()}</td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 text-right">${user.cost.toFixed(2)}</td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-navy text-right">${user.cost.toFixed(2)}</td>
               </tr>
             ))}
           </tbody>

@@ -59,6 +59,15 @@ def _get_state(db: Session, bot_id: str, library: str) -> SyncState:
     return state
 
 
+def reset_delta_tokens(db: Session, bot: BotConfig) -> None:
+    """Clear the saved delta token for every one of the bot's libraries, so
+    the next run_sync() call re-crawls everything from scratch instead of
+    only what changed (full reindex, triggered from the admin portal)."""
+    for library in bot.sharepoint.libraries:
+        _get_state(db, bot.id, library).delta_token = None
+    db.commit()
+
+
 def _is_published(item: ChangedItem, bot: BotConfig) -> bool:
     sp = bot.sharepoint
     status = (item.fields or {}).get(sp.status_column)

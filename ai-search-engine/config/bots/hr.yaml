@@ -2,29 +2,30 @@ id: hr
 name: HR Assistant
 route: /ask/hr
 enabled: true
-
 sharepoint:
   tenant: veelead-development
   site_url: https://veeleaddev.sharepoint.com/sites/AISearchDev
-  libraries: ["HR Knowledge Base"]
-
+  libraries:
+  - HR Knowledge Base
+  status_column: Status
+  published_value: Published
+  category_column: Category
+  subcategory_column: SubCategory
 vectorstore:
   collection: hr_col
-
 models:
   llm: gpt-4o-mini
-  embedding: text-embedding-3-small
-
+  embedding: bge-base-en-v1.5
 prompt:
-  system: |
-    You are the HR assistant. Answer only from the provided context and cite
-    sources. If the answer is not in the context, say you don't know.
-  temperature: 0.2
+  system: 'You are the HR assistant. Answer only from the provided context and cite
 
+    sources. If the answer is not in the context, say you don''t know.
+
+    '
+  temperature: 0.2
 indexing:
-  schedule: "0 2 * * *"
+  schedule: 0 2 * * *
   chunk_size: 800
   chunk_overlap: 100
-
 access:
   allowed_groups: []

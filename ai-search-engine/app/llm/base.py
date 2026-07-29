@@ -33,5 +33,8 @@ class LLMClient(ABC):
         ...
 
     @abstractmethod
-    def embed(self, texts: list[str], model: str) -> EmbedResult:
-        ...
+    def embed(self, texts: list[str], model: str, is_query: bool = False) -> EmbedResult:
+        """is_query: True when embedding a user's search question rather than
+        a document chunk. Some embedding models (e.g. BAAI/bge-*) recommend a
+        different representation for queries vs. passages; providers that
+        don't care can ignore this."""

@@ -48,6 +48,12 @@ class QdrantVectorStore(VectorStore):
         )
         log.info("Deleted chunks for doc '%s' from '%s'", doc_id, collection)
 
+    def delete_collection(self, collection: str) -> None:
+        existing = {c.name for c in self._client.get_collections().collections}
+        if collection in existing:
+            self._client.delete_collection(collection_name=collection)
+            log.info("Deleted Qdrant collection '%s'", collection)
+
     def index_stats(self, collection: str) -> dict:
         existing = {c.name for c in self._client.get_collections().collections}
         if collection not in existing:

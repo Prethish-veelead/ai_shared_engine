@@ -15,7 +15,7 @@ vectorstore:
   collection: it_col
 models:
   llm: gpt-4o-mini
-  embedding: text-embedding-3-small
+  embedding: bge-base-en-v1.5
 prompt:
   system: "You are the IT assistant. Answer only from the provided context and cite\n\
     \    sources. If the answer is not in the context, say you don't know.\n"

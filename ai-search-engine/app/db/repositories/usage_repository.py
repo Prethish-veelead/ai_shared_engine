@@ -10,6 +10,7 @@ from sqlalchemy import distinct, func, select
 from sqlalchemy.orm import Session
 
 from app.db.models import ChatLog, UsageLog
+from app.tracking.cost_calculator import chat_cost
 
 
 def _filter(stmt, model, bot_id, start, end):
@@ -69,15 +70,43 @@ def cost_by_user(db: Session, bot_id=None, start=None, end=None) -> list[dict]:
 
 
 def cost_summary(db: Session, bot_id=None, start=None, end=None) -> dict:
-    """Total cost split into LLM (chat) vs embedding."""
-    stmt = select(UsageLog.kind, func.sum(UsageLog.cost_usd).label("cost")).group_by(UsageLog.kind)
+    """Total cost split into LLM (chat) vs embedding, and LLM cost further
+    split into its input-token and output-token components (different rate
+    per token type, per model.pricing in config/models.yaml) - a chat call's
+    stored cost_usd is already prompt+completion combined, so we recompute
+    each half from the stored token counts rather than storing them separately.
+    """
+    stmt = select(UsageLog.kind, UsageLog.model,
+                  func.sum(UsageLog.prompt_tokens).label("prompt_tokens"),
+                  func.sum(UsageLog.completion_tokens).label("completion_tokens"),
+                  func.sum(UsageLog.cost_usd).label("cost"),
+                  ).group_by(UsageLog.kind, UsageLog.model)
     stmt = _filter(stmt, UsageLog, bot_id, start, end)
-    by_kind = {r.kind: float(r.cost or 0) for r in db.execute(stmt)}
-    llm = by_kind.get("chat", 0.0)
-    emb = by_kind.get("embedding", 0.0)
-    return {"total_cost": round(llm + emb, 6),
-            "llm_cost": round(llm, 6),
-            "embedding_cost": round(emb, 6)}
+
+    embedding_cost = 0.0
+    llm_input_cost = 0.0
+    llm_output_cost = 0.0
+    input_tokens = 0
+    output_tokens = 0
+    for kind, model, prompt_tokens, completion_tokens, cost in db.execute(stmt):
+        if kind == "embedding":
+            embedding_cost += float(cost or 0)
+        else:
+            prompt_tokens = prompt_tokens or 0
+            completion_tokens = completion_tokens or 0
+            llm_input_cost += chat_cost(model, prompt_tokens, 0)
+            llm_output_cost += chat_cost(model, 0, completion_tokens)
+            input_tokens += prompt_tokens
+            output_tokens += completion_tokens
+
+    llm_cost = llm_input_cost + llm_output_cost
+    return {"total_cost": round(llm_cost + embedding_cost, 6),
+            "llm_cost": round(llm_cost, 6),
+            "embedding_cost": round(embedding_cost, 6),
+            "llm_input_cost": round(llm_input_cost, 6),
+            "llm_output_cost": round(llm_output_cost, 6),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens}
 
 
 # ---------- usage dashboard ----------

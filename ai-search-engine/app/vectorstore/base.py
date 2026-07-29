@@ -39,6 +39,11 @@ class VectorStore(ABC):
         """Delete all chunks belonging to one source document (re-index step)."""
 
     @abstractmethod
+    def delete_collection(self, collection: str) -> None:
+        """Drop an entire collection (e.g. when its bot is deleted). No-op if
+        the collection doesn't exist."""
+
+    @abstractmethod
     def index_stats(self, collection: str) -> dict:
         """Return {'chunks': int, 'documents': int} for a bot's collection.
         'documents' is the count of distinct doc_id values among the chunks

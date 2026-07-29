@@ -27,9 +27,9 @@ export function Sidebar() {
   const pathname = usePathname();
 
   return (
-    <div className="flex h-full w-64 flex-col border-r bg-white">
+    <div className="flex h-full w-64 flex-col border-r border-navy-deep bg-navy text-white">
       <div className="flex h-16 shrink-0 items-center px-6 border-b">
-        <Bot className="h-6 w-6 text-blue-600 mr-2" />
+        <Bot className="h-6 w-6 text-orange mr-2" />
         <span className="text-lg font-semibold tracking-tight">RAG Admin</span>
       </div>
       <div className="flex flex-1 flex-col overflow-y-auto pt-4">
@@ -42,14 +42,14 @@ export function Sidebar() {
                 href={item.href}
                 className={cn(
                   isActive
-                    ? "bg-gray-50 text-blue-600"
-                    : "text-gray-700 hover:bg-gray-50 hover:text-blue-600",
+                    ? "bg-navy-deep text-white"
+                    : "text-gray-300 hover:bg-navy-deep hover:text-white",
                   "group flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors"
                 )}
               >
                 <item.icon
                   className={cn(
-                    isActive ? "text-blue-600" : "text-gray-400 group-hover:text-blue-600",
+                    isActive ? "text-orange" : "text-gray-400 group-hover:text-orange",
                     "mr-3 h-5 w-5 flex-shrink-0 transition-colors"
                   )}
                   aria-hidden="true"

@@ -31,7 +31,7 @@ export default function UsersPage() {
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-gray-900">User Analytics</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-navy">User Analytics</h1>
           <p className="text-sm text-gray-500">View activity across your user base.</p>
         </div>
       </div>
@@ -40,23 +40,23 @@ export default function UsersPage() {
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">User</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Login</th>
-              <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Questions Asked</th>
-              <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Tokens Used</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider">User</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider">Last Login</th>
+              <th className="px-6 py-3 text-right text-xs font-medium text-muted uppercase tracking-wider">Questions Asked</th>
+              <th className="px-6 py-3 text-right text-xs font-medium text-muted uppercase tracking-wider">Tokens Used</th>
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
             {users.map((user) => (
               <tr key={user.user_id} className="hover:bg-gray-50">
                 <td className="px-6 py-4 whitespace-nowrap">
-                  <div className="text-sm font-medium text-gray-900">{user.email}</div>
+                  <div className="text-sm font-medium text-navy">{user.email}</div>
                   <div className="text-sm text-gray-500">{user.user_id}</div>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                   {user.last_login ? formatDistanceToNow(new Date(user.last_login), { addSuffix: true }) : "—"}
                 </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-right">
+                <td className="px-6 py-4 whitespace-nowrap text-sm text-navy text-right">
                   {user.questions_asked.toLocaleString()}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-right">

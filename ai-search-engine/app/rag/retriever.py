@@ -12,6 +12,6 @@ class Retriever:
 
     def retrieve(self, *, collection: str, question: str, embedding_model: str,
                  top_k: int = 5) -> tuple[list[SearchHit], int]:
-        emb = self._llm.embed([question], model=embedding_model)
+        emb = self._llm.embed([question], model=embedding_model, is_query=True)
         hits = self._store.search(collection, emb.vectors[0], top_k=top_k)
         return hits, emb.total_tokens

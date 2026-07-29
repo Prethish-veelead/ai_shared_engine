@@ -26,3 +26,6 @@ class AzureSearchVectorStore(VectorStore):
 
     def index_stats(self, collection: str) -> dict:
         raise NotImplementedError
+
+    def delete_collection(self, collection: str) -> None:
+        raise NotImplementedError
