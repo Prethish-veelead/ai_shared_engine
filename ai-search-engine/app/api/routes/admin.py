@@ -28,6 +28,9 @@ from app.db.repositories.chat_repository import feedback_counts_by_bot, search_c
 from app.db.repositories.log_repository import search_events
 from app.db.session import get_session
 from app.llm.base import LLMClient
+from app.monitoring.activity import activity_by_bot
+from app.monitoring.resources import get_resources as get_system_resources
+from app.monitoring.storage import get_storage_by_bot
 from app.workers.sync_scheduler import sync_one_bot
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -75,7 +78,19 @@ def index_status(bot_id: str | None = None, db: Session = Depends(get_session)) 
     result = []
     for bot in bots:
         stats = store.index_stats(bot.vectorstore.collection)
-        states = states_by_bot.get(bot.id, [])
+        # Filtered to the bot's CURRENT (site_url, library/list) set - a
+        # renamed or removed library leaves its old SyncState row behind
+        # (config_writer.update_bot only purges rows on delete_bot, not on a
+        # plain edit), and counting every row ever created for this bot_id
+        # let a stale row for the OLD name stand in for the new one, making
+        # "all_libraries_synced" true even though the renamed library itself
+        # was never actually synced.
+        current_keys = {
+            (site.site_url, name)
+            for site in bot.sharepoint.sites
+            for name in (*site.libraries, *site.lists)
+        }
+        states = [s for s in states_by_bot.get(bot.id, []) if (s.site_url, s.library) in current_keys]
         # MIN across libraries, not MAX, and only once every configured
         # library has a row with a real last_run_at - a bot with N libraries
         # gets a separate SyncState row per library, each updated
@@ -376,4 +391,30 @@ def improve_prompt(payload: ImprovePromptRequest, user: User = Depends(get_curre
         improved = improve_system_prompt(db, payload.prompt, llm, user.id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"improved_prompt": improved}
+
+
+# ---------- resources (storage / system / activity) ----------
+# Storage is exact (each bot owns its Qdrant collection and, for list bots,
+# its own Postgres tables). RAM/CPU are NOT per-bot - all bots share one api
+# container and one worker container, so there is no OS-level "this bot used
+# X MB". System-level numbers are real; per-bot "activity" is an explicit
+# load PROXY (requests/tokens/cost share), never presented as per-bot RAM/CPU.
+# See docs/ADMIN_RESOURCES_PAGE.md.
+
+@router.get("/storage/by-bot")
+def storage_by_bot(db: Session = Depends(get_session)) -> list[dict]:
+    return get_storage_by_bot(db, get_vector_store())
+
+
+@router.get("/resources")
+def resources() -> dict:
+    return get_system_resources()
+
+
+@router.get("/activity/by-bot")
+def activity_by_bot_route(period: str | None = None, start: datetime | None = None,
+                          end: datetime | None = None, db: Session = Depends(get_session)) -> list[dict]:
+    s, e = resolve_range(period, start, end)
+    return activity_by_bot(db, s, e)
     return {"improved_prompt": improved}

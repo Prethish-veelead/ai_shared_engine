@@ -33,3 +33,6 @@ requests==2.32.3
 
 # --- Scheduling ---
 apscheduler==3.11.0
+
+# --- Monitoring (admin Resources page: system RAM/CPU/disk) ---
+psutil==6.1.0

@@ -91,8 +91,17 @@ def resolve_list_ids(bot: BotConfig, sp: SharePointClient) -> dict[int, dict]:
 
 
 def _get_state(db: Session, bot_id: str, site_url: str, library: str) -> SyncState:
+    # with_for_update() locks the row (if it exists) until this transaction
+    # commits/rolls back, so a concurrent sync for the same (bot_id,
+    # site_url, library) - manual "Sync Now" racing the cron scheduler, or
+    # two rapid manual triggers - blocks on this SELECT instead of both
+    # reading the same delta_token/last_status and one silently clobbering
+    # the other's update on commit. The existing IntegrityError handling
+    # below still covers the concurrent-INSERT case (this lock only helps
+    # once the row exists).
     state = db.scalar(select(SyncState).where(
-        SyncState.bot_id == bot_id, SyncState.site_url == site_url, SyncState.library == library))
+        SyncState.bot_id == bot_id, SyncState.site_url == site_url, SyncState.library == library
+    ).with_for_update())
     if state is None:
         state = SyncState(bot_id=bot_id, site_url=site_url, library=library)
         db.add(state)
@@ -219,8 +228,20 @@ def run_sync(bot: BotConfig, db: Session, drive_id_for: dict[int, dict[str, str]
                         if not item.download_url:
                             item.download_url = sp.get_download_url(drive_id, item.doc_id)
                         if not item.download_url:
-                            log.warning("No download URL available for '%s' - skipping", item.name)
-                            continue
+                            # Raise instead of silently skipping: /delta only
+                            # resurfaces an item that changed since the last
+                            # token, so a plain `continue` here would mean
+                            # next_delta still gets committed at the end of
+                            # this batch and this document is never indexed
+                            # again unless it changes a second time. Raising
+                            # is caught by the except Exception below, which
+                            # rolls back and does NOT advance delta_token -
+                            # this whole batch (including this doc) gets
+                            # retried on the next sync instead of being lost.
+                            raise UpstreamError(
+                                f"No download URL available for '{item.name}' "
+                                f"(doc_id={item.doc_id})"
+                            )
 
                         dest = Path(tmp) / item.name
                         sp.download(item.download_url, dest)
@@ -314,8 +335,24 @@ def run_list_sync(bot: BotConfig, db: Session, list_id_for: dict[int, dict],
 
                 # Only now clean up rows removed from the list since the last
                 # sync - see docstring above for why this runs AFTER the
-                # insert, not before.
-                vector_store.delete_stale(collection, "list_id", list_id, keep_ids=point_ids)
+                # insert, not before. Qdrant's HasIdCondition treats an empty
+                # keep_ids list as matching nothing, so must_not=[] is
+                # satisfied by every point - calling delete_stale with
+                # keep_ids=[] would wipe the ENTIRE list's previously-indexed
+                # content. That's only safe when the list is genuinely empty
+                # (sp.list_items returned zero rows); if rows exist but none
+                # passed the publish gate or embedding step this run, that's
+                # far more likely a transient fetch/filter issue than every
+                # row having been removed - skip cleanup and let the next
+                # successful run (with real point_ids) catch up instead of
+                # silently deleting everything.
+                if point_ids or not items:
+                    vector_store.delete_stale(collection, "list_id", list_id, keep_ids=point_ids)
+                else:
+                    log.warning(
+                        "Bot %s / %s: 0 of %d row(s) indexed - skipping stale cleanup "
+                        "to avoid wiping the whole list", bot.id, label, len(items)
+                    )
 
                 # Structured Postgres storage (Option A) - same fetched rows,
                 # written as real typed columns alongside the Qdrant vectors,

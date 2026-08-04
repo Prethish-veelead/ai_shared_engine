@@ -7,6 +7,7 @@ import { LogOut, LogIn, ChevronDown, Sun, Moon, Monitor } from "lucide-react";
 import { useMsal, useIsAuthenticated } from "@azure/msal-react";
 import { getApiScope } from "@/lib/msal";
 import { cn, getInitials } from "@/lib/utils";
+import { NotificationBell } from "./NotificationBell";
 
 const ROUTE_TITLES: Record<string, string> = {
   "/": "Dashboard Overview",
@@ -56,6 +57,7 @@ export function Header() {
         <h2 className="text-xl font-bold tracking-tight text-navy dark:text-white">{pageTitle}</h2>
       </div>
       <div className="flex items-center space-x-4">
+        {isAuthenticated && account && <NotificationBell />}
         {isAuthenticated && account ? (
           <div className="relative" ref={dropdownRef}>
             <button

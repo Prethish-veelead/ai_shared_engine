@@ -3,27 +3,13 @@
 import { useEffect, useState } from "react";
 import { api, Bot, LogEntry } from "@/lib/api";
 import { useAuthReady } from "@/lib/useAuthReady";
+import { LottieLoader } from "@/components/ui/LottieLoader";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { AlertCircle, FileWarning, RefreshCw, Zap, ShieldAlert, RotateCw } from "lucide-react";
+import { AlertCircle, RotateCw } from "lucide-react";
+import { LOG_TYPE_ICONS, LOG_TYPE_COLORS } from "@/lib/logTypes";
 
 const POLL_INTERVAL_MS = 60000;
-
-const typeIcons = {
-  error: AlertCircle,
-  sync: RefreshCw,
-  auth: ShieldAlert,
-  ai: Zap,
-  indexing: FileWarning,
-};
-
-const typeColors = {
-  error: "text-red-600 bg-red-50",
-  sync: "text-blue-600 bg-info",
-  auth: "text-orange-600 bg-warning",
-  ai: "text-purple-600 bg-warning",
-  indexing: "text-yellow-600 bg-warning",
-};
 
 export default function LogsPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -67,7 +53,7 @@ export default function LogsPage() {
     api.getBots().then(setBots).catch((error) => console.error("Failed to load bots", error));
   }, [authReady]);
 
-  if (loading) return <div className="flex h-full items-center justify-center">Loading logs...</div>;
+  if (loading) return <LottieLoader message="Loading logs..." />;
 
   return (
     <div className="space-y-6">
@@ -108,6 +94,7 @@ export default function LogsPage() {
             <option value="auth">Auth</option>
             <option value="ai">AI / Rate Limits</option>
             <option value="indexing">Indexing</option>
+            <option value="resource">Resource Alerts</option>
           </select>
           <button
             onClick={() => loadLogs(true)}
@@ -126,11 +113,11 @@ export default function LogsPage() {
           <p className="p-6 text-center text-sm text-gray-500 dark:text-gray-400">No logs match the current filters.</p>
         )}
         <ul className="divide-y divide-gray-200 dark:divide-navy-deep">
-          {logs.map((log, idx) => {
-            const Icon = typeIcons[log.type] || AlertCircle;
+          {logs.map((log) => {
+            const Icon = LOG_TYPE_ICONS[log.type] || AlertCircle;
             return (
-              <li key={idx} className="p-4 hover:bg-gray-50 dark:hover:bg-navy-deep/30 flex items-start gap-4">
-                <div className={cn("p-2 rounded-full", typeColors[log.type])}>
+              <li key={log.id} className="p-4 hover:bg-gray-50 dark:hover:bg-navy-deep/30 flex items-start gap-4">
+                <div className={cn("p-2 rounded-full", LOG_TYPE_COLORS[log.type])}>
                   <Icon className="h-5 w-5" />
                 </div>
                 <div className="flex-1">

@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     # limit (there is no session to limit).
     chat_history_max_messages: int = 8
 
+    # --- Admin notification bell: resource threshold alerts (app/monitoring/alerts.py) ---
+    resource_alert_threshold_pct: float = 90.0     # memory/disk %% that triggers an alert
+    resource_alert_check_interval_minutes: int = 5  # how often the worker checks
+    resource_alert_debounce_minutes: int = 30       # don't re-alert on the same metric within this window
+
     # --- Entra ID auth (Job B: user sign-in) ---
     auth_enabled: bool = True                # False = local dev bypass (see below)
     auth_tenant: str = "veelead-development"  # which tenant's users may sign in

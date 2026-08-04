@@ -7,6 +7,8 @@ EVERY call, which powers all cost/usage dashboards.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+from app.core.exceptions import ConfigError
+
 
 @dataclass
 class ChatResult:
@@ -96,4 +98,12 @@ EMBEDDING_DIMENSIONS = {
 
 
 def embedding_dimension(model: str) -> int:
-    return EMBEDDING_DIMENSIONS.get(model, 768)
+    try:
+        return EMBEDDING_DIMENSIONS[model]
+    except KeyError:
+        raise ConfigError(
+            f"Unknown embedding model '{model}' - no vector dimension registered "
+            f"for it in EMBEDDING_DIMENSIONS ({sorted(EMBEDDING_DIMENSIONS)}). "
+            "Silently guessing a dimension would create the Qdrant collection "
+            "with the wrong size, breaking every future upsert for this bot."
+        ) from None

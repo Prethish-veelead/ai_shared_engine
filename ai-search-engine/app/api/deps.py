@@ -3,7 +3,6 @@ and hands them to routes. Swapping backends happens HERE, driven by settings.
 Also provides the auth dependencies (current user, admin gate).
 """
 import threading
-from functools import lru_cache
 
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -56,15 +55,33 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
     return user
 
 
-@lru_cache
+# Plain @lru_cache doesn't stop two concurrent first-callers from both
+# running the function body before either result is cached (see the
+# get_llm_client note below - same FastAPI-threadpool race). Here that means
+# two requests arriving close together right after a restart can each open
+# their own QdrantClient connection, with one discarded and its connection
+# never closed. Same double-checked-lock fix as get_llm_client.
+_vector_store_lock = threading.Lock()
+_vector_store_instance: "VectorStore | None" = None
+
+
 def get_vector_store() -> VectorStore:
-    s = get_settings()
-    if s.vector_backend == "qdrant":
-        return QdrantVectorStore(url=s.qdrant_url, api_key=s.qdrant_api_key)
-    if s.vector_backend == "azure_search":
-        from app.vectorstore.azure_search_store import AzureSearchVectorStore
-        return AzureSearchVectorStore(endpoint=s.qdrant_url, api_key=s.qdrant_api_key or "")
-    raise ConfigError(f"Unknown vector_backend '{s.vector_backend}'")
+    global _vector_store_instance
+    if _vector_store_instance is not None:
+        return _vector_store_instance
+
+    with _vector_store_lock:
+        if _vector_store_instance is None:
+            s = get_settings()
+            if s.vector_backend == "qdrant":
+                _vector_store_instance = QdrantVectorStore(url=s.qdrant_url, api_key=s.qdrant_api_key)
+            elif s.vector_backend == "azure_search":
+                from app.vectorstore.azure_search_store import AzureSearchVectorStore
+                _vector_store_instance = AzureSearchVectorStore(endpoint=s.qdrant_url, api_key=s.qdrant_api_key or "")
+            else:
+                raise ConfigError(f"Unknown vector_backend '{s.vector_backend}'")
+
+    return _vector_store_instance
 
 
 def _build_chat_client(s) -> AzureOpenAIClient:
@@ -115,6 +132,21 @@ def get_llm_client() -> LLMClient:
     return _llm_client_instance
 
 
-@lru_cache
+# Same race/fix as get_vector_store above - built from get_vector_store()/
+# get_llm_client(), both already race-safe now, but a bare @lru_cache here
+# would still let two concurrent first-callers each construct (and one
+# discard) a separate RagPipeline wrapping those singletons.
+_pipeline_lock = threading.Lock()
+_pipeline_instance: "RagPipeline | None" = None
+
+
 def get_pipeline() -> RagPipeline:
-    return RagPipeline(get_vector_store(), get_llm_client())
+    global _pipeline_instance
+    if _pipeline_instance is not None:
+        return _pipeline_instance
+
+    with _pipeline_lock:
+        if _pipeline_instance is None:
+            _pipeline_instance = RagPipeline(get_vector_store(), get_llm_client())
+
+    return _pipeline_instance

@@ -13,6 +13,7 @@ import {
   MessageSquareText,
   Activity,
   Sparkles,
+  HardDrive,
   ChevronLeft
 } from "lucide-react";
 
@@ -25,6 +26,7 @@ const navigation = [
   { name: "User Analytics", href: "/users", icon: Users },
   { name: "Chat History", href: "/history", icon: MessageSquareText },
   { name: "Logs & Monitoring", href: "/logs", icon: Activity },
+  { name: "System", href: "/resources", icon: HardDrive },
 ];
 
 export function Sidebar() {

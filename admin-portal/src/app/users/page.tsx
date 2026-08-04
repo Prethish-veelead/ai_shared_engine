@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, UserAnalytics } from "@/lib/api";
 import { useAuthReady } from "@/lib/useAuthReady";
+import { LottieLoader } from "@/components/ui/LottieLoader";
 import { formatDistanceToNow } from "date-fns";
 
 export default function UsersPage() {
@@ -25,7 +26,7 @@ export default function UsersPage() {
     loadData();
   }, [authReady]);
 
-  if (loading) return <div className="flex h-full items-center justify-center">Loading users...</div>;
+  if (loading) return <LottieLoader message="Loading users..." />;
 
   return (
     <div className="space-y-6">

@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api, Bot, AvailableModels, IndexStatus } from "@/lib/api";
+import { api, Bot, AvailableModels, IndexStatus, deriveBotId } from "@/lib/api";
 import { useAuthReady } from "@/lib/useAuthReady";
+import { LottieLoader } from "@/components/ui/LottieLoader";
 import { Bot as BotIcon, Plus, Settings2, Trash2, Edit2, Play, Square, ExternalLink, RefreshCw, RotateCcw, ThumbsUp, ThumbsDown, Sparkles, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -81,6 +82,23 @@ export default function BotsPage() {
   const [contentType, setContentType] = useState<"library" | "list">("library");
   const authReady = useAuthReady();
 
+  // Name/Route stay uncontrolled (defaultValue, like every other plain field
+  // on this form) - these two mirror their live values purely so the Qdrant
+  // Collection preview below can recompute as the admin types, without
+  // converting the whole form to controlled state.
+  const [nameInput, setNameInput] = useState("");
+  const [routeInput, setRouteInput] = useState("");
+  // Qdrant collection is never hand-typed (Point 1): on create it's derived
+  // live from Name/Route with the exact same logic the backend payload uses
+  // (deriveBotId), so what you see here is exactly what gets created. On
+  // edit it's pinned to the bot's EXISTING collection and never recomputed -
+  // vectorstore.collection can't change after creation (the backend rejects
+  // that), so re-deriving it from a possibly-edited Route here would just
+  // produce a value the save call then fails on.
+  const collectionPreview = isEditing
+    ? (isEditing.qdrantCollection || isEditing.id)
+    : deriveBotId({ name: nameInput, route: routeInput });
+
   // System Prompt field is uncontrolled (defaultValue, read via FormData on
   // submit, like every other plain text field on this form) - "Improve
   // Prompt" reads/writes it directly through this ref instead of lifting the
@@ -126,6 +144,8 @@ export default function BotsPage() {
     setIncludeCategory(bot.includeCategory ?? false);
     setPromptBeforeImprove(null);
     setImproveError("");
+    setNameInput(bot.name || "");
+    setRouteInput(bot.route || "");
   };
 
   const openCreate = () => {
@@ -139,6 +159,8 @@ export default function BotsPage() {
     setIncludeCategory(false);
     setPromptBeforeImprove(null);
     setImproveError("");
+    setNameInput("");
+    setRouteInput("");
   };
 
   async function handleImprovePrompt() {
@@ -336,6 +358,31 @@ export default function BotsPage() {
 
     const formData = new FormData(e.currentTarget);
 
+    // Point 2: block creating a bot whose derived ID would collide with an
+    // existing one. IDs (and, since Point 1, the Qdrant collection too) are
+    // derived from Name/Route - without this check two bots could end up
+    // silently fighting over the same collection.
+    if (!isEditing) {
+      const derivedId = deriveBotId({
+        name: formData.get("name") as string,
+        route: formData.get("route") as string,
+      });
+      if (bots.some((b) => b.id === derivedId)) {
+        setFormError(`A bot already exists with ID "${derivedId}" (derived from this Name/Route) - choose a different Bot Name or Route.`);
+        return;
+      }
+    }
+
+    // Point 3: `required` on the field only enforces "not empty" - a lone
+    // "0" or any other non-cron text would otherwise sail through and the
+    // bot would just never sync, with no indication why. Require the
+    // standard 5 whitespace-separated fields (minute hour day month weekday).
+    const cronValue = ((formData.get("indexingSchedule") as string) || "").trim();
+    if (cronValue.split(/\s+/).filter(Boolean).length !== 5) {
+      setFormError(`Indexing Schedule must be a 5-field cron expression (minute hour day month weekday), e.g. "0 2 * * *" - got "${cronValue}".`);
+      return;
+    }
+
     const rawGroups = formData.get("allowedGroups") as string;
     const allowed_groups = rawGroups
       .split(/[\s,]+/)
@@ -390,9 +437,11 @@ export default function BotsPage() {
     setPromptBeforeImprove(null);
     setImproveError("");
     setIncludeCategory(false);
+    setNameInput("");
+    setRouteInput("");
   }
 
-  if (loading && bots.length === 0) return <div className="flex h-full items-center justify-center">Loading bots...</div>;
+  if (loading && bots.length === 0) return <LottieLoader message="Loading bots..." />;
 
   // Sync/reindex run in the background on the API side (see api.ts comment
   // on syncBotNow) - there's no "still running" flag, only last_sync_at per
@@ -495,11 +544,11 @@ export default function BotsPage() {
             <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Bot Name</label>
-                <input required name="name" defaultValue={isEditing?.name} className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none" placeholder="e.g. HR Assistant" />
+                <input required name="name" defaultValue={isEditing?.name} onChange={(e) => setNameInput(e.target.value)} className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none" placeholder="e.g. HR Assistant" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Route</label>
-                <input required name="route" defaultValue={isEditing?.route} className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none" placeholder="e.g. /ask/hr" />
+                <input required name="route" defaultValue={isEditing?.route} onChange={(e) => setRouteInput(e.target.value)} className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none" placeholder="e.g. /ask/hr" />
               </div>
               <div className="sm:col-span-2">
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Content Type</label>
@@ -636,7 +685,16 @@ export default function BotsPage() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Qdrant Collection Name</label>
-                <input required name="qdrantCollection" defaultValue={isEditing?.qdrantCollection || isEditing?.id} className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none" />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
+                  Auto-generated from the Route (or Bot Name as a fallback) - matches the bot&apos;s ID and can never be changed after creation.
+                </p>
+                <input
+                  readOnly
+                  disabled
+                  value={collectionPreview || "(fill in Route or Bot Name above)"}
+                  className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-gray-50 dark:bg-navy-deep/40 text-gray-500 dark:text-gray-400 px-3 py-2 text-sm cursor-not-allowed"
+                />
+                <input type="hidden" name="qdrantCollection" value={collectionPreview} />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">LLM Model</label>
@@ -656,7 +714,10 @@ export default function BotsPage() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Indexing Schedule (Cron)</label>
-                <input name="indexingSchedule" defaultValue={isEditing?.indexingSchedule || "0 0 * * *"} className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none" />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
+                  Standard 5-field cron (minute hour day month weekday), e.g. <code>0 2 * * *</code> for 2 AM daily. Required.
+                </p>
+                <input required name="indexingSchedule" defaultValue={isEditing?.indexingSchedule || "0 2 * * *"} placeholder="0 2 * * *" className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none" />
               </div>
             </div>
             <div>

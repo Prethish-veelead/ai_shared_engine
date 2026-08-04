@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, CostSummary, CostByBot, CostByModel, CostByUser } from "@/lib/api";
 import { useAuthReady } from "@/lib/useAuthReady";
+import { LottieLoader } from "@/components/ui/LottieLoader";
 import {
   BarChart, 
   Bar, 
@@ -57,7 +58,7 @@ export default function CostPage() {
     loadData();
   }, [authReady, period]);
 
-  if (loading || !summary) return <div className="flex h-full items-center justify-center">Loading cost data...</div>;
+  if (loading || !summary) return <LottieLoader message="Loading cost data..." />;
 
   const pieData = [
     { name: "LLM (Generation)", value: summary.llm_cost },

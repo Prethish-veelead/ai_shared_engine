@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, UsageSummary, UsageTrend, CostByBot } from "@/lib/api";
 import { useAuthReady } from "@/lib/useAuthReady";
+import { LottieLoader } from "@/components/ui/LottieLoader";
 import {
   BarChart, 
   Bar, 
@@ -49,7 +50,7 @@ export default function DashboardPage() {
   }, [authReady]);
 
   if (loading || !summary) {
-    return <div className="flex h-full items-center justify-center">Loading dashboard...</div>;
+    return <LottieLoader message="Loading dashboard..." />;
   }
 
   const statCards = [

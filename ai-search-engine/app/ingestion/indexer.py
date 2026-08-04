@@ -47,13 +47,17 @@ class Indexer:
                        source_name: str, embedding_model: str,
                        chunk_size: int, overlap: int,
                        extra_metadata: dict | None = None) -> int:
-        """Process one file. Delete-then-insert makes this safe for updates.
+        """Process one file. Delete-then-insert makes this safe for updates -
+        but only once the new content is ready: extraction/chunking/
+        embedding run FIRST, and the old chunks are deleted right before the
+        new ones are written. A zero-chunk extraction (corrupt/truncated
+        download, unexpected empty file) then leaves the previous sync's
+        chunks intact instead of deleting them and returning "success" with
+        nothing to replace them.
 
         extra_metadata (e.g. category / subcategory) is attached to every chunk,
         enabling richer citations and optional filtered retrieval later.
         """
-        self._store.delete_by_doc(collection, doc_id)  # no-op if new
-
         loader = get_loader(file_path)
         pages = loader.extract(file_path)
         base_metadata = {"doc_id": doc_id, "bot_id": bot_id, "source": source_name}
@@ -64,7 +68,7 @@ class Indexer:
             base_metadata=base_metadata,
         )
         if not chunks:
-            log.warning("No text extracted from %s", source_name)
+            log.warning("No text extracted from %s - leaving previous index entry untouched", source_name)
             return 0
 
         vectors, _tokens = embed_texts(self._llm, [c.text for c in chunks], embedding_model)
@@ -72,6 +76,7 @@ class Indexer:
             VectorPoint(id=str(uuid.uuid4()), vector=v, payload={**c.metadata, "text": c.text})
             for c, v in zip(chunks, vectors)
         ]
+        self._store.delete_by_doc(collection, doc_id)  # no-op if new
         self._store.upsert(collection, points)
         log.info("Indexed %s: %d chunks -> %s", source_name, len(points), collection)
         return len(points)

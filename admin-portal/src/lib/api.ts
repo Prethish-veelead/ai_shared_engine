@@ -137,6 +137,62 @@ export interface IndexStatus {
   dislikes: number;
 }
 
+// --- Resources page (storage / system / activity) ---
+// Storage is exact. System resources are real but container/system-level,
+// never per-bot. Activity is an explicit LOAD PROXY, never "RAM/CPU per bot" -
+// see docs/ADMIN_RESOURCES_PAGE.md in ai-search-engine.
+
+export interface StructuredTableStat {
+  listName: string;
+  tableName: string;
+  rows: number;
+  sizeBytes: number;
+}
+
+export interface StorageByBot {
+  botId: string;
+  name: string;
+  contentType: "library" | "list";
+  vectorPoints: number;
+  vectorSizeBytes: number;
+  vectorSizeIsEstimate: boolean;
+  structuredTables: StructuredTableStat[];
+  structuredTotalBytes: number;
+  chatRows: number;
+  usageRows: number;
+  totalStorageBytes: number;
+}
+
+export interface ContainerResourceStat {
+  memPct: number;
+  cpuPct: number;
+}
+
+export interface SystemResources {
+  memory: { usedBytes: number; limitBytes: number; pct: number };
+  cpu: { pct: number };
+  disk: { totalBytes: number; usedBytes: number; freeBytes: number; pct: number };
+  process: { rssBytes: number; cpuPct: number };
+  containers: Record<string, ContainerResourceStat> | null;
+  containersAvailable: boolean;
+  source: "cgroup" | "psutil";
+  note: string;
+}
+
+export interface ActivityByBot {
+  botId: string;
+  name: string;
+  requests: number;
+  tokens: number;
+  cost: number;
+  avgResponseTimeMs: number;
+  requestsSharePct: number;
+  tokensSharePct: number;
+  costSharePct: number;
+  lastSyncAt: string | null;
+  lastSyncStatus: string | null;
+}
+
 export interface UserAnalytics {
   user_id: string;
   email: string;
@@ -146,8 +202,9 @@ export interface UserAnalytics {
 }
 
 export interface LogEntry {
+  id: number;
   timestamp: string;
-  type: "error" | "sync" | "auth" | "ai" | "indexing";
+  type: "error" | "sync" | "auth" | "ai" | "indexing" | "resource";
   bot_id: string | null;
   message: string;
 }
@@ -239,7 +296,7 @@ async function fetcher<T>(endpoint: string, options?: RequestInit): Promise<T> {
 // filename and registry key (app/bots/schema.py). Every existing bot's route
 // is exactly `/ask/{id}`, so derive the id from the route the same way;
 // fall back to slugifying the name if the route doesn't follow that shape.
-function deriveBotId(data: Partial<Bot>): string {
+export function deriveBotId(data: Partial<Bot>): string {
   const routeMatch = data.route?.match(/^\/ask\/([a-zA-Z0-9_-]+)\/?$/);
   if (routeMatch) return routeMatch[1];
   return (data.name || "")
@@ -510,10 +567,10 @@ export const api = {
   async getLogs(params?: { type?: string; bot_id?: string; period?: string; start?: string; end?: string; limit?: number }): Promise<LogEntry[]> {
     if (USE_MOCKS) {
       return [
-        { timestamp: new Date().toISOString(), type: "error", bot_id: "hr", message: "Failed to connect to SharePoint site." },
-        { timestamp: new Date(Date.now() - 3600000).toISOString(), type: "indexing", bot_id: "it", message: "Successfully indexed 45 documents." },
-        { timestamp: new Date(Date.now() - 7200000).toISOString(), type: "ai", bot_id: "finance", message: "Rate limit exceeded for gpt-4-turbo." },
-        { timestamp: new Date(Date.now() - 86400000).toISOString(), type: "auth", bot_id: null, message: "Invalid Entra ID token received." },
+        { id: 4, timestamp: new Date().toISOString(), type: "error", bot_id: "hr", message: "Failed to connect to SharePoint site." },
+        { id: 3, timestamp: new Date(Date.now() - 3600000).toISOString(), type: "indexing", bot_id: "it", message: "Successfully indexed 45 documents." },
+        { id: 2, timestamp: new Date(Date.now() - 7200000).toISOString(), type: "ai", bot_id: "finance", message: "Rate limit exceeded for gpt-4-turbo." },
+        { id: 1, timestamp: new Date(Date.now() - 86400000).toISOString(), type: "auth", bot_id: null, message: "Invalid Entra ID token received." },
       ];
     }
     return fetcher<LogEntry[]>(`/admin/logs${buildQuery(params)}`);
@@ -535,5 +592,60 @@ export const api = {
       body: JSON.stringify({ prompt }),
     });
     return response.improved_prompt;
+  },
+
+  // Exact, no time filter - fetch once on page mount, not on every poll
+  // (pg_total_relation_size + Qdrant collection stats are a bit heavy).
+  async getStorageByBot(): Promise<StorageByBot[]> {
+    if (USE_MOCKS) {
+      return [
+        {
+          botId: "hr", name: "HR Assistant", contentType: "library",
+          vectorPoints: 3400, vectorSizeBytes: 3400 * (768 * 4 + 256), vectorSizeIsEstimate: true,
+          structuredTables: [], structuredTotalBytes: 0,
+          chatRows: 1200, usageRows: 2100,
+          totalStorageBytes: 3400 * (768 * 4 + 256),
+        },
+        {
+          botId: "list_test", name: "List Bot Structured-Storage Test", contentType: "list",
+          vectorPoints: 200, vectorSizeBytes: 200 * (768 * 4 + 256), vectorSizeIsEstimate: true,
+          structuredTables: [
+            { listName: "Employee Details", tableName: "lb_list_test__employee_details_5da7467f", rows: 100, sizeBytes: 98304 },
+            { listName: "Employee Asset Subtable", tableName: "lb_list_test__employee_asset_subtable_2f5193ef", rows: 100, sizeBytes: 65536 },
+          ],
+          structuredTotalBytes: 98304 + 65536,
+          chatRows: 60, usageRows: 60,
+          totalStorageBytes: 200 * (768 * 4 + 256) + 98304 + 65536,
+        },
+      ];
+    }
+    return fetcher<StorageByBot[]>("/admin/storage/by-bot");
+  },
+
+  // Container/system-level only - never per-bot (see SystemResources doc comment).
+  async getResources(): Promise<SystemResources> {
+    if (USE_MOCKS) {
+      return {
+        memory: { usedBytes: 1_400_000_000, limitBytes: 4_000_000_000, pct: 35.0 },
+        cpu: { pct: 12.5 },
+        disk: { totalBytes: 60_000_000_000, usedBytes: 22_000_000_000, freeBytes: 38_000_000_000, pct: 36.7 },
+        process: { rssBytes: 210_000_000, cpuPct: 3.2 },
+        containers: null,
+        containersAvailable: false,
+        source: "cgroup",
+        note: "Per-container breakdown needs Docker socket access on the VM - not mounted in this deployment.",
+      };
+    }
+    return fetcher<SystemResources>("/admin/resources");
+  },
+
+  async getActivityByBot(params?: TimeFilterParams): Promise<ActivityByBot[]> {
+    if (USE_MOCKS) {
+      return [
+        { botId: "hr", name: "HR Assistant", requests: 3400, tokens: 1200000, cost: 45.20, avgResponseTimeMs: 820, requestsSharePct: 45.3, tokensSharePct: 60.0, costSharePct: 62.3, lastSyncAt: new Date(Date.now() - 3600000).toISOString(), lastSyncStatus: "success" },
+        { botId: "it", name: "IT Support Assistant", requests: 4100, tokens: 800000, cost: 20.50, avgResponseTimeMs: 650, requestsSharePct: 54.7, tokensSharePct: 40.0, costSharePct: 37.7, lastSyncAt: new Date(Date.now() - 7200000).toISOString(), lastSyncStatus: "success" },
+      ];
+    }
+    return fetcher<ActivityByBot[]>(`/admin/activity/by-bot${buildQuery({ period: params?.period, start: params?.start, end: params?.end })}`);
   }
 };

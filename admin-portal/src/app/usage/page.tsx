@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, UsageSummary, UsageTrend, Bot } from "@/lib/api";
 import { useAuthReady } from "@/lib/useAuthReady";
+import { LottieLoader } from "@/components/ui/LottieLoader";
 import {
   LineChart, 
   Line, 
@@ -51,7 +52,7 @@ export default function UsagePage() {
     loadData();
   }, [authReady, botId, period]);
 
-  if (loading || !summary) return <div className="flex h-full items-center justify-center">Loading usage...</div>;
+  if (loading || !summary) return <LottieLoader message="Loading usage..." />;
 
   return (
     <div className="space-y-6">

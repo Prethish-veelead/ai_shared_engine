@@ -16,3 +16,14 @@ export function getInitials(label: string): string {
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
   return local.slice(0, 2).toUpperCase();
 }
+
+// Human-readable byte size (used by the Resources page for storage/memory/
+// disk numbers) - binary units (1024-based), matching how Docker/the OS
+// itself reports memory and disk.
+export function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / Math.pow(1024, exp);
+  return `${exp === 0 ? value : value.toFixed(1)} ${units[exp]}`;
+}

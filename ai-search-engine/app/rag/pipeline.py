@@ -112,7 +112,7 @@ class RagPipeline:
                 log.warning("Bot %s: expected JSON for extra response_fields, got: %r",
                             bot.id, chat.text[:200])
 
-        if bot.include_category and hits:
+        if bot.include_category and hits and "category" not in extra_fields:
             extra_fields["category"] = hits[0].payload.get("category")
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)

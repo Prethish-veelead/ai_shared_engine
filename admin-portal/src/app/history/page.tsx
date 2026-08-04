@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, ChatHistoryRow, Bot } from "@/lib/api";
 import { useAuthReady } from "@/lib/useAuthReady";
+import { LottieLoader } from "@/components/ui/LottieLoader";
 import { Search, ChevronDown, ChevronUp, ThumbsUp, ThumbsDown } from "lucide-react";
 import { format } from "date-fns";
 import { cn, getInitials } from "@/lib/utils";
@@ -70,7 +71,7 @@ export default function HistoryPage() {
     loadData();
   }, [authReady, botId, keyword]);
 
-  if (loading) return <div className="flex h-full items-center justify-center">Loading chat history...</div>;
+  if (loading) return <LottieLoader message="Loading chat history..." />;
 
   const botName = (botId: string) => bots.find(b => b.id === botId)?.name ?? botId;
 

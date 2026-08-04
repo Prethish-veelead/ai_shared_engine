@@ -71,6 +71,16 @@ class ResponseField(BaseModel):
     prompt: str
 
 
+# AskResponse's fixed base fields (app/api/routes/ask.py) - a response_fields
+# entry sharing one of these names would collide with the same-named keyword
+# argument in AskResponse(**result.extra_fields), raising a TypeError on
+# every single call to that bot. Reject it at config-load time instead.
+RESERVED_RESPONSE_FIELD_NAMES = {
+    "answer", "citations", "model", "total_tokens", "cost_usd",
+    "response_time_ms", "chat_log_id",
+}
+
+
 class BotConfig(BaseModel):
     id: str
     name: str
@@ -119,4 +129,26 @@ class BotConfig(BaseModel):
                     "sites has 'libraries' configured - a bot can't mix libraries "
                     "and lists yet. Remove 'libraries' or set content_type: library."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _valid_response_fields(self) -> "BotConfig":
+        for f in self.response_fields:
+            if f.name in RESERVED_RESPONSE_FIELD_NAMES:
+                raise ValueError(
+                    f"Bot '{self.id}': response_fields entry '{f.name}' collides with "
+                    f"a fixed base response field ({sorted(RESERVED_RESPONSE_FIELD_NAMES)}). "
+                    "Pick a different name."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _valid_chunking(self) -> "BotConfig":
+        if self.indexing.chunk_overlap >= self.indexing.chunk_size:
+            raise ValueError(
+                f"Bot '{self.id}': indexing.chunk_overlap ({self.indexing.chunk_overlap}) "
+                f"must be smaller than indexing.chunk_size ({self.indexing.chunk_size}) - "
+                "otherwise the chunker's sliding window never advances and hangs indefinitely "
+                "on any document longer than one chunk."
+            )
         return self
