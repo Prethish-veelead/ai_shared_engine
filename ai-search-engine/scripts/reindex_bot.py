@@ -9,5 +9,6 @@ from app.bots.registry import registry
 if __name__ == "__main__":
     registry.load()
     bot = registry.get(sys.argv[1])
-    print(f"Would re-index bot '{bot.id}' from site {bot.sharepoint.site_url}")
+    sites = ", ".join(s.site_url for s in bot.sharepoint.sites)
+    print(f"Would re-index bot '{bot.id}' from site(s): {sites}")
     print("Implement: reset SyncState.delta_token=None then call run_sync().")

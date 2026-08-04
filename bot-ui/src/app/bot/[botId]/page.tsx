@@ -2,8 +2,8 @@
 
 import { use, useState, useRef, useEffect } from "react";
 import { AppShell } from "@/components/layout/AppShell";
-import { api, Citation } from "@/lib/api";
-import { Send, Bot, User, Loader2, AlertCircle } from "lucide-react";
+import { api, Citation, HistoryTurn } from "@/lib/api";
+import { Send, Bot, User, Loader2, AlertCircle, ThumbsUp, ThumbsDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface Message {
@@ -16,7 +16,15 @@ interface Message {
     timeMs: number;
   };
   error?: string;
+  botId?: string;
+  chatLogId?: number;
+  feedback?: "like" | "dislike" | null;
 }
+
+// Client-side safety cap on how much history a single request body carries -
+// the backend's chat_history_max_messages setting is the authoritative
+// trim, this just keeps a very long session's payload from growing unbounded.
+const HISTORY_CLIENT_SEND_CAP = 16;
 
 export default function BotChatPage({ params }: { params: Promise<{ botId: string }> }) {
   const resolvedParams = use(params);
@@ -26,6 +34,18 @@ export default function BotChatPage({ params }: { params: Promise<{ botId: strin
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // Next.js doesn't remount page.tsx on a dynamic-param change (only
+  // template.tsx gets that), so without this the chat history and any
+  // in-flight request from the previous bot would carry over when the
+  // user switches bots via the AppShell dropdown.
+  const activeBotIdRef = useRef(botId);
+
+  useEffect(() => {
+    activeBotIdRef.current = botId;
+    setMessages([]);
+    setInput("");
+    setIsTyping(false);
+  }, [botId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -34,18 +54,31 @@ export default function BotChatPage({ params }: { params: Promise<{ botId: strin
   const handleSend = async () => {
     if (!input.trim() || isTyping) return;
 
+    const requestBotId = botId;
     const userMessage: Message = {
       id: Date.now().toString(),
       role: "user",
       content: input.trim(),
     };
 
+    // Temporary, non-persisted history (docs/CHAT_SESSIONS.md): built from
+    // this in-memory `messages` state, sent with the request, and never
+    // written anywhere else - a refresh/tab close just loses it, by design.
+    // The backend trims to its own window authoritatively; this client-side
+    // cap just keeps the request body from growing unbounded in a very long
+    // session.
+    const history: HistoryTurn[] = messages
+      .filter((m) => !m.error)
+      .slice(-HISTORY_CLIENT_SEND_CAP)
+      .map((m) => ({ role: m.role === "user" ? "user" : "assistant", content: m.content }));
+
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
     setIsTyping(true);
 
     try {
-      const response = await api.askBot(botId, userMessage.content);
+      const response = await api.askBot(requestBotId, userMessage.content, history);
+      if (activeBotIdRef.current !== requestBotId) return;
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "bot",
@@ -55,9 +88,13 @@ export default function BotChatPage({ params }: { params: Promise<{ botId: strin
           model: response.model,
           timeMs: response.response_time_ms,
         },
+        botId: requestBotId,
+        chatLogId: response.chat_log_id,
+        feedback: null,
       };
       setMessages((prev) => [...prev, botMessage]);
     } catch (error: any) {
+      if (activeBotIdRef.current !== requestBotId) return;
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "bot",
@@ -66,7 +103,19 @@ export default function BotChatPage({ params }: { params: Promise<{ botId: strin
       };
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
-      setIsTyping(false);
+      if (activeBotIdRef.current === requestBotId) setIsTyping(false);
+    }
+  };
+
+  const handleFeedback = async (msg: Message, feedback: "like" | "dislike") => {
+    if (!msg.botId || msg.chatLogId == null || msg.feedback === feedback) return;
+    const previous = msg.feedback ?? null;
+    setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, feedback } : m)));
+    try {
+      await api.sendFeedback(msg.botId, msg.chatLogId, feedback);
+    } catch (error) {
+      console.error(error);
+      setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, feedback: previous } : m)));
     }
   };
 
@@ -79,27 +128,30 @@ export default function BotChatPage({ params }: { params: Promise<{ botId: strin
 
   return (
     <AppShell>
-      <div className="flex h-full flex-col">
-        {/* Header */}
-        <div className="shrink-0 border-b bg-white/50 px-6 py-3 backdrop-blur-sm flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-100">
-              <Bot className="h-4 w-4 text-blue-700" />
+      <div className="flex h-full flex-col bg-gray-50/30 dark:bg-navy-deep/20">
+        {/* Header - Glassmorphism */}
+        <div className="shrink-0 border-b border-gray-200/50 dark:border-navy/50 bg-white/70 dark:bg-navy/60 px-6 py-4 backdrop-blur-md flex items-center justify-between shadow-sm z-10">
+          <div className="flex items-center gap-4">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-orange text-white shadow-md">
+              <Bot className="h-5 w-5" />
             </div>
             <div>
-              <h2 className="text-sm font-semibold text-gray-900 capitalize">{botId} Bot</h2>
-              <p className="text-xs text-gray-500">Ready to answer your questions</p>
+              <h2 className="text-base font-bold text-navy dark:text-white capitalize">{botId} Assistant</h2>
+              <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Ready to answer your questions</p>
             </div>
           </div>
         </div>
 
         {/* Chat Area */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 bg-gray-50/50">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 relative">
           {messages.length === 0 && (
-            <div className="flex h-full items-center justify-center text-center text-gray-500">
-              <div>
-                <Bot className="mx-auto h-12 w-12 text-gray-300 mb-3" />
-                <p>Send a message to start chatting with the {botId} bot.</p>
+            <div className="flex h-full items-center justify-center text-center">
+              <div className="bg-white/50 dark:bg-navy/30 backdrop-blur-sm p-8 rounded-3xl border border-white/20 dark:border-white/5 shadow-xl max-w-sm">
+                <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-orange/10 dark:bg-orange/20 mb-4">
+                  <Bot className="h-8 w-8 text-orange" />
+                </div>
+                <h3 className="text-lg font-bold text-navy dark:text-white mb-2">How can I help you today?</h3>
+                <p className="text-sm text-gray-500 dark:text-gray-400">Send a message to start chatting with the {botId} assistant.</p>
               </div>
             </div>
           )}
@@ -108,22 +160,22 @@ export default function BotChatPage({ params }: { params: Promise<{ botId: strin
             <div
               key={msg.id}
               className={cn(
-                "flex max-w-[85%] sm:max-w-[75%] flex-col gap-2",
+                "flex max-w-[85%] sm:max-w-[75%] flex-col gap-2 relative",
                 msg.role === "user" ? "ml-auto items-end" : "mr-auto items-start"
               )}
             >
               <div
                 className={cn(
-                  "rounded-2xl px-4 py-3 text-sm shadow-sm",
+                  "px-5 py-4 text-[15px] shadow-sm leading-relaxed backdrop-blur-md",
                   msg.role === "user"
-                    ? "bg-blue-600 text-white rounded-br-sm"
-                    : "bg-white text-gray-800 border border-gray-100 rounded-bl-sm"
+                    ? "bg-navy dark:bg-accent text-white rounded-2xl rounded-br-sm shadow-md"
+                    : "bg-white/90 dark:bg-card/90 text-navy dark:text-gray-100 border border-gray-100/50 dark:border-navy-deep/50 rounded-2xl rounded-bl-sm"
                 )}
               >
                 {msg.error ? (
-                  <div className="flex items-center gap-2 text-red-600">
-                    <AlertCircle className="h-4 w-4" />
-                    <span>{msg.error}</span>
+                  <div className="flex items-center gap-2 text-rose-500">
+                    <AlertCircle className="h-5 w-5" />
+                    <span className="font-medium">{msg.error}</span>
                   </div>
                 ) : (
                   <div className="whitespace-pre-wrap">{msg.content}</div>
@@ -131,11 +183,11 @@ export default function BotChatPage({ params }: { params: Promise<{ botId: strin
 
                 {/* Citations */}
                 {msg.citations && msg.citations.length > 0 && (
-                  <div className="mt-3 flex flex-wrap gap-1.5 pt-3 border-t border-gray-100">
+                  <div className="mt-4 flex flex-wrap gap-2 pt-3 border-t border-black/5 dark:border-white/10">
                     {msg.citations.map((cit, idx) => (
                       <span
                         key={idx}
-                        className="inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700 border border-blue-100"
+                        className="inline-flex items-center rounded-lg bg-orange/10 dark:bg-orange/20 px-2.5 py-1 text-[11px] font-semibold text-orange-hover dark:text-orange border border-orange/20"
                         title={cit.source}
                       >
                         {cit.source.split("/").pop()} 
@@ -148,43 +200,71 @@ export default function BotChatPage({ params }: { params: Promise<{ botId: strin
 
               {/* Metadata */}
               {msg.metadata && (
-                <div className="px-1 text-[10px] text-gray-400 font-medium">
-                  {msg.metadata.model} • {(msg.metadata.timeMs / 1000).toFixed(1)}s
+                <div className="px-2 flex items-center gap-3 text-[11px] text-gray-400 dark:text-gray-500 font-medium">
+                  <span>{msg.metadata.model} • {(msg.metadata.timeMs / 1000).toFixed(1)}s</span>
+                  {msg.chatLogId != null && (
+                    <span className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => handleFeedback(msg, "like")}
+                        title="Good answer"
+                        className={cn(
+                          "rounded-md p-1 transition-colors",
+                          msg.feedback === "like"
+                            ? "text-emerald-600 dark:text-emerald-400"
+                            : "text-gray-300 dark:text-gray-600 hover:text-emerald-600 dark:hover:text-emerald-400"
+                        )}
+                      >
+                        <ThumbsUp className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        onClick={() => handleFeedback(msg, "dislike")}
+                        title="Bad answer"
+                        className={cn(
+                          "rounded-md p-1 transition-colors",
+                          msg.feedback === "dislike"
+                            ? "text-rose-600 dark:text-rose-400"
+                            : "text-gray-300 dark:text-gray-600 hover:text-rose-600 dark:hover:text-rose-400"
+                        )}
+                      >
+                        <ThumbsDown className="h-3.5 w-3.5" />
+                      </button>
+                    </span>
+                  )}
                 </div>
               )}
             </div>
           ))}
 
           {isTyping && (
-            <div className="mr-auto flex max-w-[75%] items-center gap-2 rounded-2xl rounded-bl-sm bg-white border border-gray-100 px-4 py-3 text-sm text-gray-500 shadow-sm">
-              <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
-              <span>Generating response...</span>
+            <div className="mr-auto flex max-w-[75%] items-center gap-3 rounded-2xl rounded-bl-sm bg-white/80 dark:bg-card/80 backdrop-blur-md border border-gray-100/50 dark:border-navy-deep/50 px-5 py-4 text-sm text-gray-500 shadow-sm">
+              <Loader2 className="h-5 w-5 animate-spin text-orange" />
+              <span className="font-medium">Generating response...</span>
             </div>
           )}
-          <div ref={messagesEndRef} />
+          <div ref={messagesEndRef} className="h-4" />
         </div>
 
-        {/* Input Area */}
-        <div className="shrink-0 bg-white p-4 sm:p-6 border-t">
-          <div className="mx-auto max-w-4xl relative flex items-end overflow-hidden rounded-2xl border border-gray-300 bg-white shadow-sm focus-within:border-blue-600 focus-within:ring-1 focus-within:ring-blue-600">
+        {/* Input Area - Glassmorphism */}
+        <div className="shrink-0 bg-white/70 dark:bg-navy/70 backdrop-blur-lg p-4 sm:p-6 border-t border-gray-200/50 dark:border-navy-deep/50 z-10">
+          <div className="mx-auto max-w-4xl relative flex items-end overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-navy-deep shadow-inner focus-within:border-orange focus-within:ring-1 focus-within:ring-orange transition-all">
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Ask a question..."
-              className="max-h-32 min-h-[56px] w-full resize-none bg-transparent py-4 pl-4 pr-12 text-sm focus:outline-none"
+              className="max-h-32 min-h-[60px] w-full resize-none bg-transparent py-4 pl-5 pr-14 text-sm focus:outline-none text-navy dark:text-white placeholder:text-gray-400"
               rows={1}
               disabled={isTyping}
             />
             <button
               onClick={handleSend}
               disabled={!input.trim() || isTyping}
-              className="absolute bottom-2 right-2 flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white transition-colors hover:bg-blue-700 disabled:bg-gray-100 disabled:text-gray-400"
+              className="absolute bottom-2 right-2 flex h-11 w-11 items-center justify-center rounded-xl bg-orange text-white transition-all hover:bg-orange-hover hover:scale-105 disabled:bg-gray-100 dark:disabled:bg-gray-800 disabled:text-gray-400 disabled:hover:scale-100 shadow-sm"
             >
-              <Send className="h-4 w-4" />
+              <Send className="h-5 w-5" />
             </button>
           </div>
-          <p className="mt-2 text-center text-[10px] text-gray-400">
+          <p className="mt-3 text-center text-[11px] font-medium text-gray-400 dark:text-gray-500">
             AI-generated responses can be inaccurate. Please check the provided citations.
           </p>
         </div>

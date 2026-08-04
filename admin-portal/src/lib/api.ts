@@ -9,14 +9,30 @@ const DEFAULT_SHAREPOINT_TENANT = process.env.NEXT_PUBLIC_SHAREPOINT_TENANT || "
 
 // --- Types ---
 
+export interface SharePointSiteEntry {
+  siteUrl: string;
+  libraries: string[];
+  lists: string[];
+}
+
+export interface ResponseFieldEntry {
+  name: string;
+  prompt: string;
+}
+
 export interface Bot {
   id: string;
   name: string;
   route: string;
   enabled: boolean;
-  // Additional fields for the form that might not exist in the basic list yet
-  sharepointSite?: string;
-  sharepointLibraries?: string[];
+  // A bot is either a "Library bot" (files) or a "List bot" (SharePoint List
+  // rows) - not both at once (hybrid is a possible future addition, not
+  // supported yet). Immutable after creation - see config_writer.py.
+  contentType?: "library" | "list";
+  // Additional fields for the form that might not exist in the basic list yet.
+  // A bot can pull from more than one SharePoint site, each with its own
+  // libraries/lists - names are only unique WITHIN a site.
+  sharepointSites?: SharePointSiteEntry[];
   qdrantCollection?: string;
   llmModel?: string;
   embeddingModel?: string;
@@ -25,6 +41,14 @@ export interface Bot {
   access?: {
     allowed_groups: string[];
   };
+  // Extra fields this bot adds to its /ask response, on top of the fixed
+  // base fields (answer, citations, model, tokens, cost, latency) - those
+  // never change. Generated in the SAME LLM call as the answer, not a
+  // second one (see ai-search-engine/app/rag/prompt_builder.py).
+  responseFields?: ResponseFieldEntry[];
+  // Free: read straight off the top-cited chunk's SharePoint Category
+  // column metadata, no extra LLM call.
+  includeCategory?: boolean;
 }
 
 export interface ChatHistoryRow {
@@ -34,10 +58,13 @@ export interface ChatHistoryRow {
   user_email: string | null;
   question: string;
   answer: string;
+  prompt_tokens: number;
+  completion_tokens: number;
   total_tokens: number;
   cost_usd: number;
   response_time_ms: number;
   created_at: string;
+  feedback: "like" | "dislike" | null;
 }
 
 export interface CostByBot {
@@ -49,8 +76,11 @@ export interface CostByBot {
 
 export interface CostByModel {
   model: string;
+  kind: "chat" | "embedding";
   cost: number;
   tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
 }
 
 export interface UsageSummary {
@@ -103,6 +133,8 @@ export interface IndexStatus {
   documents_indexed: number;
   chunks_indexed: number;
   last_sync_at: string | null;
+  likes: number;
+  dislikes: number;
 }
 
 export interface UserAnalytics {
@@ -228,10 +260,10 @@ function toBotConfigPayload(botId: string, data: Partial<Bot>) {
     name: data.name,
     route: data.route,
     enabled: data.enabled ?? true,
+    content_type: data.contentType || "library",
     sharepoint: {
       tenant: DEFAULT_SHAREPOINT_TENANT,
-      site_url: data.sharepointSite,
-      libraries: data.sharepointLibraries || [],
+      sites: (data.sharepointSites || []).map((s) => ({ site_url: s.siteUrl, libraries: s.libraries, lists: s.lists })),
     },
     vectorstore: {
       collection: data.qdrantCollection || botId,
@@ -252,6 +284,8 @@ function toBotConfigPayload(botId: string, data: Partial<Bot>) {
     access: {
       allowed_groups: data.access?.allowed_groups || [],
     },
+    response_fields: (data.responseFields || []).map((f) => ({ name: f.name, prompt: f.prompt })),
+    include_category: data.includeCategory ?? false,
   };
 }
 
@@ -261,9 +295,9 @@ export const api = {
   async getBots(): Promise<Bot[]> {
     if (USE_MOCKS) {
       return [
-        { id: "hr", name: "HR Assistant", route: "/ask/hr", enabled: true, sharepointSite: "https://contoso.sharepoint.com/sites/hr", llmModel: "gpt-4-turbo" },
-        { id: "it", name: "IT Helpdesk", route: "/ask/it", enabled: true, sharepointSite: "https://contoso.sharepoint.com/sites/it", llmModel: "gpt-35-turbo" },
-        { id: "finance", name: "Finance Policy", route: "/ask/finance", enabled: false, sharepointSite: "https://contoso.sharepoint.com/sites/finance", llmModel: "gpt-4" },
+        { id: "hr", name: "HR Assistant", route: "/ask/hr", enabled: true, contentType: "library", sharepointSites: [{ siteUrl: "https://contoso.sharepoint.com/sites/hr", libraries: ["HR Docs"], lists: [] }], llmModel: "gpt-4-turbo" },
+        { id: "it", name: "IT Helpdesk", route: "/ask/it", enabled: true, contentType: "library", sharepointSites: [{ siteUrl: "https://contoso.sharepoint.com/sites/it", libraries: ["IT Docs"], lists: [] }], llmModel: "gpt-35-turbo" },
+        { id: "finance", name: "Finance Policy", route: "/ask/finance", enabled: false, contentType: "library", sharepointSites: [{ siteUrl: "https://contoso.sharepoint.com/sites/finance", libraries: ["Finance Docs"], lists: [] }], llmModel: "gpt-4" },
       ];
     }
     return fetcher<Bot[]>("/admin/bots");
@@ -287,8 +321,8 @@ export const api = {
   async getIndexStatus(botId?: string): Promise<IndexStatus[]> {
     if (USE_MOCKS) {
       return [
-        { bot_id: "hr", documents_indexed: 12, chunks_indexed: 84, last_sync_at: new Date().toISOString() },
-        { bot_id: "it", documents_indexed: 5, chunks_indexed: 31, last_sync_at: new Date().toISOString() },
+        { bot_id: "hr", documents_indexed: 12, chunks_indexed: 84, last_sync_at: new Date().toISOString(), likes: 8, dislikes: 1 },
+        { bot_id: "it", documents_indexed: 5, chunks_indexed: 31, last_sync_at: new Date().toISOString(), likes: 3, dislikes: 0 },
       ];
     }
     // Read live from the vector store (app/api/routes/admin.py index_status) -
@@ -305,12 +339,19 @@ export const api = {
     return fetcher<string[]>(`/admin/sharepoint/libraries${buildQuery({ site_url: siteUrl, tenant: DEFAULT_SHAREPOINT_TENANT })}`);
   },
 
+  async getSharePointLists(siteUrl: string): Promise<string[]> {
+    if (USE_MOCKS) return ["IT FAQ", "Ticket Categories"];
+    // Same idea as getSharePointLibraries, but for genuine SharePoint Lists
+    // (app/api/routes/admin.py sharepoint_lists) - powers a List bot's picker.
+    return fetcher<string[]>(`/admin/sharepoint/lists${buildQuery({ site_url: siteUrl, tenant: DEFAULT_SHAREPOINT_TENANT })}`);
+  },
+
   async getChatHistory(params?: { bot_id?: string; user_id?: string; keyword?: string; limit?: number }): Promise<ChatHistoryRow[]> {
     if (USE_MOCKS) {
       return [
-        { id: "1", bot_id: "hr", user_id: "alice@contoso.com", user_email: "alice@contoso.com", question: "How many vacation days do I get?", answer: "You have 20 PTO days...", total_tokens: 450, cost_usd: 0.003, response_time_ms: 1200, created_at: new Date().toISOString() },
-        { id: "2", bot_id: "it", user_id: "bob@contoso.com", user_email: "bob@contoso.com", question: "How to reset VPN?", answer: "Go to the portal and click...", total_tokens: 300, cost_usd: 0.002, response_time_ms: 950, created_at: new Date(Date.now() - 3600000).toISOString() },
-        { id: "3", bot_id: "hr", user_id: "charlie@contoso.com", user_email: "charlie@contoso.com", question: "What is the holiday schedule?", answer: "We observe 10 federal holidays...", total_tokens: 500, cost_usd: 0.004, response_time_ms: 1500, created_at: new Date(Date.now() - 86400000).toISOString() },
+        { id: "1", bot_id: "hr", user_id: "alice@contoso.com", user_email: "alice@contoso.com", question: "How many vacation days do I get?", answer: "You have 20 PTO days...", prompt_tokens: 380, completion_tokens: 70, total_tokens: 450, cost_usd: 0.003, response_time_ms: 1200, created_at: new Date().toISOString(), feedback: "like" },
+        { id: "2", bot_id: "it", user_id: "bob@contoso.com", user_email: "bob@contoso.com", question: "How to reset VPN?", answer: "Go to the portal and click...", prompt_tokens: 250, completion_tokens: 50, total_tokens: 300, cost_usd: 0.002, response_time_ms: 950, created_at: new Date(Date.now() - 3600000).toISOString(), feedback: null },
+        { id: "3", bot_id: "hr", user_id: "charlie@contoso.com", user_email: "charlie@contoso.com", question: "What is the holiday schedule?", answer: "We observe 10 federal holidays...", prompt_tokens: 420, completion_tokens: 80, total_tokens: 500, cost_usd: 0.004, response_time_ms: 1500, created_at: new Date(Date.now() - 86400000).toISOString(), feedback: "dislike" },
       ];
     }
     return fetcher<ChatHistoryRow[]>(`/admin/chat-history${buildQuery(params)}`);
@@ -332,9 +373,9 @@ export const api = {
   async getCostByModel(params?: TimeFilterParams): Promise<CostByModel[]> {
     if (USE_MOCKS) {
       return [
-        { model: "gpt-4-turbo", cost: 60.10, tokens: 1500000 },
-        { model: "gpt-35-turbo", cost: 12.40, tokens: 600000 },
-        { model: "text-embedding-3-large", cost: 2.10, tokens: 50000 },
+        { model: "gpt-4-turbo", kind: "chat", cost: 60.10, tokens: 1500000, prompt_tokens: 1100000, completion_tokens: 400000 },
+        { model: "gpt-35-turbo", kind: "chat", cost: 12.40, tokens: 600000, prompt_tokens: 450000, completion_tokens: 150000 },
+        { model: "text-embedding-3-large", kind: "embedding", cost: 2.10, tokens: 50000, prompt_tokens: 50000, completion_tokens: 0 },
       ];
     }
     // Same as by-bot: no bot_id filter on this endpoint server-side.
@@ -476,5 +517,23 @@ export const api = {
       ];
     }
     return fetcher<LogEntry[]>(`/admin/logs${buildQuery(params)}`);
+  },
+
+  async askAssistant(question: string): Promise<string> {
+    if (USE_MOCKS) return `(mock) You asked: "${question}"`;
+    const response = await fetcher<{ answer: string }>("/admin/assistant/ask", {
+      method: "POST",
+      body: JSON.stringify({ question }),
+    });
+    return response.answer;
+  },
+
+  async improveSystemPrompt(prompt: string): Promise<string> {
+    if (USE_MOCKS) return `(mock improved)\n\n${prompt}`;
+    const response = await fetcher<{ improved_prompt: string }>("/admin/bots/improve-prompt", {
+      method: "POST",
+      body: JSON.stringify({ prompt }),
+    });
+    return response.improved_prompt;
   }
 };

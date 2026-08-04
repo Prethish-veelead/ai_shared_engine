@@ -2,6 +2,7 @@
 and hands them to routes. Swapping backends happens HERE, driven by settings.
 Also provides the auth dependencies (current user, admin gate).
 """
+import threading
 from functools import lru_cache
 
 from fastapi import Depends
@@ -78,18 +79,40 @@ def _build_chat_client(s) -> AzureOpenAIClient:
     raise ConfigError(f"Unknown llm_backend '{s.llm_backend}'")
 
 
-@lru_cache
-def get_llm_client() -> LLMClient:
-    s = get_settings()
-    chat_client = _build_chat_client(s)
+# Plain @lru_cache doesn't stop two concurrent first-callers from both
+# running the function body before either result is cached - FastAPI resolves
+# sync dependencies in a threadpool, so two requests arriving close together
+# right after a restart both entered this function before it returned.
+# Building LocalEmbeddingModel (sentence-transformers -> torch) twice at once
+# is not thread-safe: the second construction can observe the first's
+# partially-initialized model and fail with "Cannot copy out of meta tensor;
+# no data!" - a crash that only ever shows up under this exact race, and only
+# once, right after a restart (once one construction wins and the module-
+# level cache below is populated, every later call just reuses it).
+_llm_client_lock = threading.Lock()
+_llm_client_instance: "LLMClient | None" = None
 
-    if s.embedding_backend == "azure_openai":
-        return chat_client  # AzureOpenAIClient handles both chat and embed itself
-    if s.embedding_backend == "local":
-        from app.llm.hybrid import HybridLLMClient
-        from app.llm.local_embedding import LocalEmbeddingModel
-        return HybridLLMClient(chat_client, LocalEmbeddingModel(s.local_embedding_model))
-    raise ConfigError(f"Unknown embedding_backend '{s.embedding_backend}'")
+
+def get_llm_client() -> LLMClient:
+    global _llm_client_instance
+    if _llm_client_instance is not None:
+        return _llm_client_instance
+
+    with _llm_client_lock:
+        if _llm_client_instance is None:
+            s = get_settings()
+            chat_client = _build_chat_client(s)
+
+            if s.embedding_backend == "azure_openai":
+                _llm_client_instance = chat_client  # AzureOpenAIClient handles both chat and embed itself
+            elif s.embedding_backend == "local":
+                from app.llm.hybrid import HybridLLMClient
+                from app.llm.local_embedding import LocalEmbeddingModel
+                _llm_client_instance = HybridLLMClient(chat_client, LocalEmbeddingModel(s.local_embedding_model))
+            else:
+                raise ConfigError(f"Unknown embedding_backend '{s.embedding_backend}'")
+
+    return _llm_client_instance
 
 
 @lru_cache

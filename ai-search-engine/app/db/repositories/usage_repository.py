@@ -35,9 +35,19 @@ def cost_by_bot(db: Session, bot_id=None, start=None, end=None) -> list[dict]:
 
 
 def cost_by_model(db: Session, bot_id=None, start=None, end=None) -> list[dict]:
-    stmt = select(UsageLog.model,
+    # kind ("chat" | "embedding") is included so callers can filter by type
+    # without guessing from the model name - a bot renamed to a different
+    # embedding model would silently break a name-based filter. prompt/
+    # completion tokens are broken out (not just the combined `tokens`) so
+    # the Cost Dashboard can show input-vs-output per model once more than
+    # one model is actually in use - a single combined number hides which
+    # model is driving usage when several are mixed together.
+    stmt = select(UsageLog.model, UsageLog.kind,
                   func.sum(UsageLog.cost_usd).label("cost"),
-                  func.sum(UsageLog.total_tokens).label("tokens")).group_by(UsageLog.model)
+                  func.sum(UsageLog.total_tokens).label("tokens"),
+                  func.sum(UsageLog.prompt_tokens).label("prompt_tokens"),
+                  func.sum(UsageLog.completion_tokens).label("completion_tokens"),
+                  ).group_by(UsageLog.model, UsageLog.kind)
     stmt = _filter(stmt, UsageLog, bot_id, start, end)
     return [dict(r._mapping) for r in db.execute(stmt)]
 

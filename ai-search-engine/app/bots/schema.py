@@ -1,13 +1,31 @@
 """The BotConfig schema. Every config/bots/*.yaml is validated against this
 at startup, so a malformed bot fails loudly on load instead of at runtime.
 """
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
+
+
+class SharePointSite(BaseModel):
+    site_url: str
+    libraries: list[str] = Field(default_factory=list)
+    # SharePoint Lists (structured rows - Question/Answer/Category, not
+    # files) this site contributes, for a "list" content_type bot. Kept on
+    # the same site block as libraries so the admin form's multi-site
+    # picker works identically for both - see BotConfig.content_type for why
+    # a single bot only ever populates one of libraries/lists, not both.
+    lists: list[str] = Field(default_factory=list)
 
 
 class SharePointConfig(BaseModel):
     tenant: str                       # which M365 tenant (multi-tenant support)
-    site_url: str
-    libraries: list[str] = Field(default_factory=list)
+    # A bot can pull from more than one SharePoint site, each with its own
+    # set of libraries - e.g. an HR site's "Policies" library plus a
+    # separate Onboarding site's "New Hire Guides" library, combined into
+    # one bot. Library names are only unique WITHIN a site, so each site's
+    # libraries are kept grouped with that site rather than flattened into
+    # one list (a library named "Documents" can exist on more than one site).
+    sites: list[SharePointSite] = Field(default_factory=list)
 
     # Column-based publish gate + metadata. Defaults match the agreed columns;
     # override here if a tenant's internal column names differ. Only documents
@@ -42,14 +60,63 @@ class AccessConfig(BaseModel):
     allowed_groups: list[str] = Field(default_factory=list)  # Entra group IDs
 
 
+class ResponseField(BaseModel):
+    """One extra field a bot adds to its /ask response, on top of the fixed
+    base fields (answer, citations, model, total_tokens, cost_usd,
+    response_time_ms) - those never change shape for any bot. `prompt` tells
+    the LLM what to generate for this field; it's produced in the SAME
+    completion that generates the answer (see app/rag/prompt_builder.py),
+    not a second LLM call."""
+    name: str
+    prompt: str
+
+
 class BotConfig(BaseModel):
     id: str
     name: str
     route: str
     enabled: bool = True
+    # A bot is either a "Library bot" (files, chunked and embedded) or a
+    # "List bot" (SharePoint List rows, one row = one chunk) - not both at
+    # once. Hybrid (one bot mixing files and list rows) is a real future
+    # possibility but deliberately out of scope for now; the validator below
+    # enforces it so a misconfigured bot fails loudly at load instead of
+    # silently ignoring half its configured sources.
+    content_type: Literal["library", "list"] = "library"
+    # List bots only: also sync each SharePoint List's rows into its own typed
+    # Postgres table (app/db/list_tables.py), alongside the existing Qdrant
+    # embedding - similarity search alone can't answer exact counts/filters/
+    # joins. Ignored for library bots. Defaults on so this is automatic,
+    # per-bot opt-out only if a specific list bot doesn't need it.
+    structured_store: bool = True
     sharepoint: SharePointConfig
     vectorstore: VectorStoreConfig
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     prompt: PromptConfig
     indexing: IndexingConfig = Field(default_factory=IndexingConfig)
     access: AccessConfig = Field(default_factory=AccessConfig)
+    # Both optional and additive - empty/false (the default) means today's
+    # exact base-only response, unchanged.
+    response_fields: list[ResponseField] = Field(default_factory=list)
+    # Free: read straight off the top-cited chunk's SharePoint Category
+    # column metadata (already stored on every chunk at ingestion time), no
+    # extra LLM call.
+    include_category: bool = False
+
+    @model_validator(mode="after")
+    def _no_hybrid_sources(self) -> "BotConfig":
+        if self.content_type == "library":
+            if any(site.lists for site in self.sharepoint.sites):
+                raise ValueError(
+                    f"Bot '{self.id}': content_type is 'library' but one or more "
+                    "sites has 'lists' configured - a bot can't mix libraries and "
+                    "lists yet. Remove 'lists' or set content_type: list."
+                )
+        else:
+            if any(site.libraries for site in self.sharepoint.sites):
+                raise ValueError(
+                    f"Bot '{self.id}': content_type is 'list' but one or more "
+                    "sites has 'libraries' configured - a bot can't mix libraries "
+                    "and lists yet. Remove 'libraries' or set content_type: library."
+                )
+        return self

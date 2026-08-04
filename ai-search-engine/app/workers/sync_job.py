@@ -10,16 +10,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_llm_client, get_vector_store
 from app.bots.schema import BotConfig
-from app.core.exceptions import ConfigError
+from app.core.exceptions import ConfigError, UpstreamError
 from app.core.logging import get_logger
+from app.db.list_tables import reconcile_list_tables, sync_list_table
 from app.db.models import SyncState
+from app.db.session import get_engine
 from app.ingestion.indexer import Indexer
 from app.ingestion.sharepoint_client import ChangedItem, SharePointClient
 from app.ingestion.tenant_resolver import resolve_tenant
+from app.llm.base import embedding_dimension
 
 log = get_logger(__name__)
 
@@ -30,41 +34,90 @@ def build_sharepoint_client(bot: BotConfig) -> SharePointClient:
     return SharePointClient(creds.tenant_id, creds.client_id, creds.client_secret)
 
 
-def resolve_drive_ids(bot: BotConfig, sp: SharePointClient) -> dict[str, str]:
-    """Turn the bot's friendly site_url + library names into the
-    {library -> drive_id} map that run_sync needs. You put URLs in the YAML;
-    Graph IDs are resolved here at runtime.
-    """
-    site_id = sp.resolve_site(bot.sharepoint.site_url)
-    all_drives = sp.resolve_drives(site_id)          # {display name -> drive id}
+def resolve_drive_ids(bot: BotConfig, sp: SharePointClient) -> dict[int, dict[str, str]]:
+    """Turn each of the bot's sites' friendly site_url + library names into
+    the {site index -> {library -> drive_id}} map that run_sync needs. You
+    put URLs in the YAML; Graph IDs are resolved here at runtime.
 
-    drive_id_for: dict[str, str] = {}
-    for library in bot.sharepoint.libraries:
-        if library not in all_drives:
-            raise ConfigError(
-                f"Bot '{bot.id}': library '{library}' not found in site "
-                f"{bot.sharepoint.site_url}. Available: {sorted(all_drives)}"
-            )
-        drive_id_for[library] = all_drives[library]
+    Keyed by each site's position in bot.sharepoint.sites, NOT by site_url:
+    nothing stops two entries from pointing at the same site_url with
+    different library groups (e.g. organizing one site's libraries into two
+    named blocks in the admin form), and keying by site_url alone let the
+    second entry's drive-id map silently overwrite the first's, making the
+    first entry's libraries fail with a KeyError during sync. Library names
+    are also only unique WITHIN a site, which is why this is nested per-site
+    rather than one flat {library -> drive_id} map - two different sites
+    could each have a library named "Documents".
+    """
+    drive_id_for: dict[int, dict[str, str]] = {}
+    for i, site in enumerate(bot.sharepoint.sites):
+        site_id = sp.resolve_site(site.site_url)
+        all_drives = sp.resolve_drives(site_id)      # {display name -> drive id}
+
+        site_drives: dict[str, str] = {}
+        for library in site.libraries:
+            if library not in all_drives:
+                raise ConfigError(
+                    f"Bot '{bot.id}': library '{library}' not found in site "
+                    f"{site.site_url}. Available: {sorted(all_drives)}"
+                )
+            site_drives[library] = all_drives[library]
+        drive_id_for[i] = site_drives
     return drive_id_for
 
 
-def _get_state(db: Session, bot_id: str, library: str) -> SyncState:
+def resolve_list_ids(bot: BotConfig, sp: SharePointClient) -> dict[int, dict]:
+    """Mirrors resolve_drive_ids, but for SharePoint Lists. Each entry is
+    {"site_id": <graph site id>, "lists": {list name -> list id}} - site_id
+    is cached here too since (unlike a drive) a list's Graph endpoint is
+    scoped under its site (/sites/{site_id}/lists/{list_id}/...), so
+    run_list_sync needs it for every item fetch, not just once at resolve time.
+    """
+    list_id_for: dict[int, dict] = {}
+    for i, site in enumerate(bot.sharepoint.sites):
+        site_id = sp.resolve_site(site.site_url)
+        all_lists = sp.resolve_lists(site_id)
+
+        site_lists: dict[str, str] = {}
+        for lst in site.lists:
+            if lst not in all_lists:
+                raise ConfigError(
+                    f"Bot '{bot.id}': list '{lst}' not found in site "
+                    f"{site.site_url}. Available: {sorted(all_lists)}"
+                )
+            site_lists[lst] = all_lists[lst]
+        list_id_for[i] = {"site_id": site_id, "lists": site_lists}
+    return list_id_for
+
+
+def _get_state(db: Session, bot_id: str, site_url: str, library: str) -> SyncState:
     state = db.scalar(select(SyncState).where(
-        SyncState.bot_id == bot_id, SyncState.library == library))
+        SyncState.bot_id == bot_id, SyncState.site_url == site_url, SyncState.library == library))
     if state is None:
-        state = SyncState(bot_id=bot_id, library=library)
+        state = SyncState(bot_id=bot_id, site_url=site_url, library=library)
         db.add(state)
-        db.flush()
+        try:
+            db.flush()
+        except IntegrityError:
+            # Lost the race to a concurrent sync run (manual "Sync Now" +
+            # the cron scheduler, or two rapid manual triggers) that inserted
+            # this (bot_id, site_url, library) row first. Back off and read
+            # the row the other transaction created instead of ending up
+            # with two.
+            db.rollback()
+            state = db.scalar(select(SyncState).where(
+                SyncState.bot_id == bot_id, SyncState.site_url == site_url, SyncState.library == library))
     return state
 
 
 def reset_delta_tokens(db: Session, bot: BotConfig) -> None:
-    """Clear the saved delta token for every one of the bot's libraries, so
-    the next run_sync() call re-crawls everything from scratch instead of
-    only what changed (full reindex, triggered from the admin portal)."""
-    for library in bot.sharepoint.libraries:
-        _get_state(db, bot.id, library).delta_token = None
+    """Clear the saved delta token for every library on every one of the
+    bot's sites, so the next run_sync() call re-crawls everything from
+    scratch instead of only what changed (full reindex, triggered from the
+    admin portal)."""
+    for site in bot.sharepoint.sites:
+        for library in site.libraries:
+            _get_state(db, bot.id, site.site_url, library).delta_token = None
     db.commit()
 
 
@@ -83,64 +136,219 @@ def _metadata(item: ChangedItem, bot: BotConfig) -> dict:
     }
 
 
-def run_sync(bot: BotConfig, db: Session, drive_id_for: dict[str, str],
+def _is_list_item_published(fields: dict, bot: BotConfig) -> bool:
+    """Same publish gate as documents, but optional: many Lists (e.g. a
+    plain FAQ list) have no Status column at all, and treating that as
+    "not published" would silently index nothing. Only gate on it when the
+    column is actually present on this row."""
+    sp = bot.sharepoint
+    if sp.status_column not in fields:
+        return True
+    return str(fields.get(sp.status_column)).strip().lower() == sp.published_value.strip().lower()
+
+
+def _list_item_metadata(fields: dict, bot: BotConfig) -> dict:
+    sp = bot.sharepoint
+    return {
+        "category": fields.get(sp.category_column),
+        "subcategory": fields.get(sp.subcategory_column),
+    }
+
+
+def run_sync(bot: BotConfig, db: Session, drive_id_for: dict[int, dict[str, str]],
              sp: SharePointClient | None = None) -> None:
-    """drive_id_for maps library name -> Graph drive id (resolve once, cache).
-    sp is optional (built from the tenant resolver if not provided; injectable
-    for tests).
+    """drive_id_for maps each site's index in bot.sharepoint.sites -> {library
+    name -> Graph drive id} (resolve once, cache). sp is optional (built from
+    the tenant resolver if not provided; injectable for tests).
     """
     sp = sp or build_sharepoint_client(bot)
-    indexer = Indexer(get_vector_store(), get_llm_client())
+    vector_store = get_vector_store()
+    indexer = Indexer(vector_store, get_llm_client())
     collection = bot.vectorstore.collection
 
-    for library in bot.sharepoint.libraries:
-        state = _get_state(db, bot.id, library)
-        drive_id = drive_id_for[library]
-        items, next_delta = sp.delta(drive_id, state.delta_token)
-        log.info("Bot %s / %s: %d changed item(s)", bot.id, library, len(items))
+    # A brand-new bot's collection has never been created in Qdrant - nothing
+    # else in this flow ever creates it (scripts/create_collection.py was the
+    # only caller of ensure_collection(), and it's a manual step nothing in
+    # the admin UI tells you to run). Without this, the very first sync for
+    # any newly-created bot fails outright: delete_by_doc() 404s on a
+    # collection that doesn't exist yet. ensure_collection() is a no-op if
+    # the collection already exists, so this is safe on every subsequent run.
+    vector_store.ensure_collection(collection, embedding_dimension(bot.models.embedding))
 
-        with tempfile.TemporaryDirectory() as tmp:
-            for item in items:
-                # Hard delete from SharePoint -> remove chunks.
-                if item.deleted:
-                    indexer.delete_document(collection=collection, doc_id=item.doc_id)
-                    continue
+    # Each (site, library) pair is isolated in its own try/except + commit: a
+    # transient SharePoint/Graph error (timeout, 5xx) on one used to
+    # propagate straight out of this whole function, aborting every site and
+    # library that came after it for the entire run, with no record of the
+    # failure (last_status stayed at whatever it was before - "success" from
+    # a prior run - so the admin UI showed nothing wrong). Now a failing
+    # (site, library) is marked failed and skipped; the rest still run, and
+    # the failure is still raised at the end so sync_scheduler's per-bot
+    # catch logs/records it as before.
+    total_libraries = sum(len(site.libraries) for site in bot.sharepoint.sites)
+    failed: list[str] = []
 
-                # Read the file's SharePoint columns for the publish gate.
-                item.fields = sp.get_fields(drive_id, item.doc_id)
+    for i, site in enumerate(bot.sharepoint.sites):
+        for library in site.libraries:
+            state = _get_state(db, bot.id, site.site_url, library)
+            label = f"{site.site_url} :: {library}"
+            try:
+                drive_id = drive_id_for[i][library]
+                items, next_delta = sp.delta(drive_id, state.delta_token)
+                log.info("Bot %s / %s: %d changed item(s)", bot.id, label, len(items))
 
-                # Publish gate: only Published docs are indexed; anything else
-                # (incl. un-published) has its chunks removed.
-                if not _is_published(item, bot):
-                    log.info("Skipping/removing '%s' (Status != %s)",
-                             item.name, bot.sharepoint.published_value)
-                    indexer.delete_document(collection=collection, doc_id=item.doc_id)
-                    continue
+                with tempfile.TemporaryDirectory() as tmp:
+                    for item in items:
+                        # Hard delete from SharePoint -> remove chunks.
+                        if item.deleted:
+                            indexer.delete_document(collection=collection, doc_id=item.doc_id)
+                            continue
 
-                # /delta doesn't reliably include a direct download URL - fetch
-                # one explicitly for docs that pass the publish gate.
-                if not item.download_url:
-                    item.download_url = sp.get_download_url(drive_id, item.doc_id)
-                if not item.download_url:
-                    log.warning("No download URL available for '%s' - skipping", item.name)
-                    continue
+                        # Read the file's SharePoint columns for the publish gate.
+                        item.fields = sp.get_fields(drive_id, item.doc_id)
 
-                dest = Path(tmp) / item.name
-                sp.download(item.download_url, dest)
-                try:
-                    indexer.index_document(
-                        collection=collection, bot_id=bot.id, doc_id=item.doc_id,
-                        file_path=dest, source_name=item.name,
-                        embedding_model=bot.models.embedding,
-                        chunk_size=bot.indexing.chunk_size,
-                        overlap=bot.indexing.chunk_overlap,
-                        extra_metadata=_metadata(item, bot),
+                        # Publish gate: only Published docs are indexed; anything else
+                        # (incl. un-published) has its chunks removed.
+                        if not _is_published(item, bot):
+                            log.info("Skipping/removing '%s' (Status != %s)",
+                                     item.name, bot.sharepoint.published_value)
+                            indexer.delete_document(collection=collection, doc_id=item.doc_id)
+                            continue
+
+                        # /delta doesn't reliably include a direct download URL - fetch
+                        # one explicitly for docs that pass the publish gate.
+                        if not item.download_url:
+                            item.download_url = sp.get_download_url(drive_id, item.doc_id)
+                        if not item.download_url:
+                            log.warning("No download URL available for '%s' - skipping", item.name)
+                            continue
+
+                        dest = Path(tmp) / item.name
+                        sp.download(item.download_url, dest)
+                        try:
+                            indexer.index_document(
+                                collection=collection, bot_id=bot.id, doc_id=item.doc_id,
+                                file_path=dest, source_name=item.name,
+                                embedding_model=bot.models.embedding,
+                                chunk_size=bot.indexing.chunk_size,
+                                overlap=bot.indexing.chunk_overlap,
+                                extra_metadata=_metadata(item, bot),
+                            )
+                        except ValueError as exc:   # unsupported file type -> skip, don't crash
+                            log.warning("Skipping %s: %s", item.name, exc)
+
+                state.delta_token = next_delta
+                state.index_version += 1            # bump -> flush question cache (phase 2)
+                state.last_run_at = datetime.now(timezone.utc)
+                state.last_status = "success"
+                db.commit()
+            except Exception:
+                db.rollback()
+                state = _get_state(db, bot.id, site.site_url, library)
+                state.last_run_at = datetime.now(timezone.utc)
+                state.last_status = "failed"
+                db.commit()
+                log.exception("Bot %s / %s: sync failed, others unaffected", bot.id, label)
+                failed.append(label)
+
+    if failed:
+        raise UpstreamError(
+            f"Bot '{bot.id}': sync failed for {len(failed)} of "
+            f"{total_libraries} librar"
+            f"{'y' if total_libraries == 1 else 'ies'} "
+            f"({', '.join(failed)}); others synced normally"
+        )
+
+
+def run_list_sync(bot: BotConfig, db: Session, list_id_for: dict[int, dict],
+                  sp: SharePointClient | None = None) -> None:
+    """List-mode bots re-pull every current row on every sync rather than
+    tracking deltas: SharePoint Lists are typically small (tens/hundreds of
+    rows, not thousands of files), so the delta-token machinery run_sync()
+    needs for large document libraries isn't worth the extra state here.
+
+    Every row currently in the list is re-indexed FIRST (upsert with a
+    deterministic per-row point id, so a still-existing row overwrites its
+    old point instead of duplicating it); only AFTER that succeeds are rows
+    removed from the list since the last sync cleaned up, via
+    VectorStore.delete_stale(..., keep_ids=<ids just written>). Doing the
+    insert before the delete (not the other way around) means a failure
+    partway through - the embed call rate-limited, Qdrant rejecting an
+    oversized upsert, a network blip - leaves the previous sync's data
+    intact instead of leaving the bot with zero indexed rows until the next
+    successful run.
+    """
+    sp = sp or build_sharepoint_client(bot)
+    vector_store = get_vector_store()
+    indexer = Indexer(vector_store, get_llm_client())
+    collection = bot.vectorstore.collection
+    vector_store.ensure_collection(collection, embedding_dimension(bot.models.embedding))
+
+    # Structured Postgres storage (Option A): drop tables/registry rows for
+    # any list no longer declared in this bot's config, BEFORE syncing the
+    # ones that remain - see list_tables.reconcile_list_tables docstring.
+    declared_list_ids = {
+        list_id for site_info in list_id_for.values() for list_id in site_info["lists"].values()
+    }
+    reconcile_list_tables(bot, db, vector_store, get_engine(), declared_list_ids)
+
+    total_lists = sum(len(site.lists) for site in bot.sharepoint.sites)
+    failed: list[str] = []
+
+    for i, site in enumerate(bot.sharepoint.sites):
+        site_id = list_id_for[i]["site_id"]
+        for list_name, list_id in list_id_for[i]["lists"].items():
+            state = _get_state(db, bot.id, site.site_url, list_name)
+            label = f"{site.site_url} :: {list_name}"
+            try:
+                items = sp.list_items(site_id, list_id)
+                log.info("Bot %s / %s: %d row(s)", bot.id, label, len(items))
+
+                published = [item for item in items if _is_list_item_published(item.fields, bot)]
+                indexed, point_ids = indexer.index_list_items(
+                    collection=collection, bot_id=bot.id, list_id=list_id,
+                    site_url=site.site_url, list_name=list_name, items=published,
+                    embedding_model=bot.models.embedding,
+                    extra_metadata_for=lambda fields: _list_item_metadata(fields, bot),
+                )
+                log.info("Bot %s / %s: indexed %d of %d row(s)", bot.id, label, indexed, len(items))
+
+                # Only now clean up rows removed from the list since the last
+                # sync - see docstring above for why this runs AFTER the
+                # insert, not before.
+                vector_store.delete_stale(collection, "list_id", list_id, keep_ids=point_ids)
+
+                # Structured Postgres storage (Option A) - same fetched rows,
+                # written as real typed columns alongside the Qdrant vectors,
+                # so exact counts/filters/joins are possible later. Runs
+                # inside the SAME try/except as the vector path: one list's
+                # structured-sync failure is contained here exactly like a
+                # vector-sync failure already is, not allowed to abort the
+                # other lists in this bot.
+                if bot.structured_store:
+                    sync_list_table(
+                        engine=get_engine(), db=db, bot_id=bot.id, list_id=list_id,
+                        list_name=list_name, items=items,
+                        status_column=bot.sharepoint.status_column,
+                        published_value=bot.sharepoint.published_value,
                     )
-                except ValueError as exc:   # unsupported file type -> skip, don't crash
-                    log.warning("Skipping %s: %s", item.name, exc)
 
-        state.delta_token = next_delta
-        state.index_version += 1            # bump -> flush question cache (phase 2)
-        state.last_run_at = datetime.now(timezone.utc)
-        state.last_status = "success"
-        db.commit()
+                state.index_version += 1
+                state.last_run_at = datetime.now(timezone.utc)
+                state.last_status = "success"
+                db.commit()
+            except Exception:
+                db.rollback()
+                state = _get_state(db, bot.id, site.site_url, list_name)
+                state.last_run_at = datetime.now(timezone.utc)
+                state.last_status = "failed"
+                db.commit()
+                log.exception("Bot %s / %s: list sync failed, others unaffected", bot.id, label)
+                failed.append(label)
+
+    if failed:
+        raise UpstreamError(
+            f"Bot '{bot.id}': sync failed for {len(failed)} of "
+            f"{total_lists} list"
+            f"{'' if total_lists == 1 else 's'} "
+            f"({', '.join(failed)}); others synced normally"
+        )

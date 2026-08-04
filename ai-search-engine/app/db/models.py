@@ -4,7 +4,8 @@ target if you move config into the DB via the admin portal.
 """
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Float, Integer, String, Text, func
+from sqlalchemy import BigInteger, DateTime, Float, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -31,6 +32,10 @@ class ChatLog(Base):
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     response_time_ms: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # "like" | "dislike" | null (no feedback given). Calling the feedback
+    # endpoint is entirely optional for any bot consumer - this column just
+    # stays null forever for a caller that never uses it.
+    feedback: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 class UsageLog(Base):
@@ -53,12 +58,31 @@ class UsageLog(Base):
 
 
 class SyncState(Base):
-    """Per-library SharePoint delta token + last-run info (incremental sync)."""
+    """Per-site-per-library SharePoint delta token + last-run info
+    (incremental sync).
+
+    A bot can now pull from more than one SharePoint site (app/bots/schema.py
+    SharePointConfig.sites), and library names are only unique WITHIN a site -
+    two different sites can each have a library literally named "Documents" -
+    so the row key has to be (bot_id, site_url, library), not just
+    (bot_id, library), or two same-named libraries on different sites would
+    collide and corrupt each other's delta tokens.
+
+    The unique constraint closes a TOCTOU race in sync_job._get_state(): two
+    concurrent sync triggers for the same bot (e.g. a manual "Sync Now" and
+    the cron scheduler firing at the same time) could both SELECT, find no
+    row, and both INSERT before either committed - producing two rows for
+    the same (bot_id, site_url, library) that future lookups would pick
+    between arbitrarily. The DB now rejects the second insert outright, and
+    _get_state() catches that and re-reads the row the other transaction
+    created instead."""
 
     __tablename__ = "sync_state"
+    __table_args__ = (UniqueConstraint("bot_id", "site_url", "library", name="uq_sync_state_bot_site_library"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     bot_id: Mapped[str] = mapped_column(String(64), index=True)
+    site_url: Mapped[str] = mapped_column(String(512), default="")
     library: Mapped[str] = mapped_column(String(256))
     delta_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     index_version: Mapped[int] = mapped_column(Integer, default=1)  # bump to flush cache
@@ -77,6 +101,36 @@ class EventLog(Base):
     type: Mapped[str] = mapped_column(String(16), index=True)
     bot_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     message: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ListTable(Base):
+    """Registry of the structured Postgres table backing one SharePoint List
+    for a content_type=list bot (Option A - dual storage: rows are embedded
+    into Qdrant AS TODAY for semantic search, AND written here as real typed
+    columns so exact counts/filters/joins are possible - similarity search
+    alone can only ever return a fuzzy top-k, never an exhaustive answer).
+
+    Keyed by (bot_id, list_id) - list_id is the STABLE Graph list id, not the
+    display name, so a list renamed on the real SharePoint site (this
+    happened mid-session on the real tenant used to build this feature)
+    keeps its same table; only list_name gets updated.
+
+    This is the source of truth reconcile_list_tables() diffs against the
+    bot's current YAML-declared lists: a list is "new" if it has no row
+    here, "removed" if it has a row here but is no longer declared."""
+
+    __tablename__ = "list_tables"
+    __table_args__ = (UniqueConstraint("bot_id", "list_id", name="uq_list_tables_bot_list"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    bot_id: Mapped[str] = mapped_column(String(64), index=True)
+    list_id: Mapped[str] = mapped_column(String(128))
+    list_name: Mapped[str] = mapped_column(String(256))
+    table_name: Mapped[str] = mapped_column(String(63))
+    column_map: Mapped[dict] = mapped_column(JSONB)   # {sharepoint_field_name: sql_column_name}
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

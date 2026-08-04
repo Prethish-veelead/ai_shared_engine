@@ -4,8 +4,11 @@ Deployment names in Azure often differ from model names; here we assume the
 deployment name matches the model id in the bot config. Adjust the mapping in
 _deployment() if yours differ.
 """
+import json
+
 from app.core.exceptions import UpstreamError
-from app.llm.base import ChatResult, EmbedResult, LLMClient
+from app.llm.base import ChatResult, EmbedResult, LLMClient, ToolCall, ToolChatResult
+from app.rag.history import build_messages
 
 
 class AzureOpenAIClient(LLMClient):
@@ -21,15 +24,14 @@ class AzureOpenAIClient(LLMClient):
         # Central place to map model id -> Azure deployment name if they differ.
         return model
 
-    def chat(self, system: str, user: str, model: str, temperature: float = 0.2) -> ChatResult:
+    def chat(self, system: str, user: str, model: str, temperature: float = 0.2,
+             json_mode: bool = False, history: list[dict] | None = None) -> ChatResult:
         try:
             resp = self._client.chat.completions.create(
                 model=self._deployment(model),
                 temperature=temperature,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
+                messages=build_messages(system, history, user),
+                **({"response_format": {"type": "json_object"}} if json_mode else {}),
             )
         except Exception as exc:
             raise UpstreamError(f"Azure OpenAI chat failed: {exc}") from exc
@@ -40,6 +42,44 @@ class AzureOpenAIClient(LLMClient):
             prompt_tokens=usage.prompt_tokens,
             completion_tokens=usage.completion_tokens,
             model=model,
+        )
+
+    def chat_with_tools(self, messages: list[dict], model: str, tools: list[dict],
+                        temperature: float = 0.2) -> ToolChatResult:
+        try:
+            resp = self._client.chat.completions.create(
+                model=self._deployment(model),
+                temperature=temperature,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+            )
+        except Exception as exc:
+            raise UpstreamError(f"Azure OpenAI tool-calling chat failed: {exc}") from exc
+
+        choice = resp.choices[0]
+        raw_tool_calls = choice.message.tool_calls or []
+        tool_calls = []
+        for tc in raw_tool_calls:
+            try:
+                arguments = json.loads(tc.function.arguments) if tc.function.arguments else {}
+            except json.JSONDecodeError:
+                # A model that emits malformed JSON args is a tool-call
+                # failure, not a request failure - surface it as an empty
+                # arguments dict so the tool executor's own validation
+                # rejects it cleanly (missing required args) instead of
+                # crashing the whole request here.
+                arguments = {}
+            tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=arguments))
+
+        usage = resp.usage
+        return ToolChatResult(
+            content=choice.message.content,
+            tool_calls=tool_calls,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            model=model,
+            assistant_message=choice.message.model_dump(),
         )
 
     def embed(self, texts: list[str], model: str, is_query: bool = False) -> EmbedResult:

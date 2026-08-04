@@ -57,14 +57,14 @@ export default function UsagePage() {
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-navy">Usage Dashboard</h1>
-          <p className="text-sm text-gray-500">Monitor token consumption and request volume.</p>
+          <h1 className="text-2xl font-bold tracking-tight text-navy dark:text-white">Usage Dashboard</h1>
+          <p className="text-sm text-gray-500 dark:text-gray-400">Monitor token consumption and request volume.</p>
         </div>
         <div className="flex items-center gap-2">
           <select
             value={botId}
             onChange={(e) => setBotId(e.target.value)}
-            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-orange"
+            className="rounded-md border border-gray-300 dark:border-navy-deep px-3 py-1.5 text-sm bg-white dark:bg-card dark:text-white focus:outline-none focus:ring-2 focus:ring-orange"
           >
             <option value="">All Bots</option>
             {bots.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
@@ -72,7 +72,7 @@ export default function UsagePage() {
           <select
             value={period}
             onChange={(e) => setPeriod(e.target.value)}
-            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-orange"
+            className="rounded-md border border-gray-300 dark:border-navy-deep px-3 py-1.5 text-sm bg-white dark:bg-card dark:text-white focus:outline-none focus:ring-2 focus:ring-orange"
           >
             <option value="today">Today</option>
             <option value="last_7_days">Last 7 Days</option>
@@ -83,28 +83,28 @@ export default function UsagePage() {
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="rounded-lg border bg-white p-6 shadow-sm">
-          <p className="text-sm font-medium text-gray-500">Total Tokens</p>
-          <h3 className="text-2xl font-semibold text-navy mt-2">{summary.total_tokens.toLocaleString()}</h3>
-          <p className="text-xs text-gray-400 mt-1">Prompt: {summary.prompt_tokens.toLocaleString()} | Completion: {summary.completion_tokens.toLocaleString()}</p>
+        <div className="rounded-lg border border-gray-200 dark:border-navy-deep bg-white dark:bg-card p-6 shadow-sm">
+          <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Total Tokens</p>
+          <h3 className="text-2xl font-semibold text-navy dark:text-white mt-2">{summary.total_tokens.toLocaleString()}</h3>
+          <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Prompt: {summary.prompt_tokens.toLocaleString()} | Completion: {summary.completion_tokens.toLocaleString()}</p>
         </div>
-        <div className="rounded-lg border bg-white p-6 shadow-sm">
-          <p className="text-sm font-medium text-gray-500">Avg Response Time</p>
-          <h3 className="text-2xl font-semibold text-navy mt-2">{summary.avg_response_time_ms} ms</h3>
+        <div className="rounded-lg border border-gray-200 dark:border-navy-deep bg-white dark:bg-card p-6 shadow-sm">
+          <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Avg Response Time</p>
+          <h3 className="text-2xl font-semibold text-navy dark:text-white mt-2">{summary.avg_response_time_ms} ms</h3>
         </div>
-        <div className="rounded-lg border bg-white p-6 shadow-sm">
-          <p className="text-sm font-medium text-gray-500">Active Users</p>
-          <h3 className="text-2xl font-semibold text-navy mt-2">{summary.active_users.toLocaleString()}</h3>
+        <div className="rounded-lg border border-gray-200 dark:border-navy-deep bg-white dark:bg-card p-6 shadow-sm">
+          <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Active Users</p>
+          <h3 className="text-2xl font-semibold text-navy dark:text-white mt-2">{summary.active_users.toLocaleString()}</h3>
         </div>
-        <div className="rounded-lg border bg-white p-6 shadow-sm">
-          <p className="text-sm font-medium text-gray-500">Chunks Indexed</p>
-          <h3 className="text-2xl font-semibold text-navy mt-2">{indexTotals.chunks.toLocaleString()}</h3>
-          <p className="text-xs text-gray-400 mt-1">{indexTotals.documents.toLocaleString()} docs across all bots</p>
+        <div className="rounded-lg border border-gray-200 dark:border-navy-deep bg-white dark:bg-card p-6 shadow-sm">
+          <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Chunks Indexed</p>
+          <h3 className="text-2xl font-semibold text-navy dark:text-white mt-2">{indexTotals.chunks.toLocaleString()}</h3>
+          <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">{indexTotals.documents.toLocaleString()} docs across all bots</p>
         </div>
       </div>
 
-      <div className="rounded-lg border bg-white p-6 shadow-sm">
-        <h3 className="text-base font-semibold text-navy mb-4">Token Usage Trend</h3>
+      <div className="rounded-lg border border-gray-200 dark:border-navy-deep bg-white dark:bg-card p-6 shadow-sm">
+        <h3 className="text-base font-semibold text-navy dark:text-white mb-4">Token Usage Trend</h3>
         <div className="h-80">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={trend}>

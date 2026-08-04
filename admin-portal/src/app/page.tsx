@@ -62,27 +62,27 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight text-navy">Dashboard</h1>
-        <p className="text-sm text-gray-500">Overview of your Multi-Bot RAG system.</p>
+        <h1 className="text-2xl font-bold tracking-tight text-navy dark:text-white">Dashboard</h1>
+        <p className="text-sm text-gray-500 dark:text-gray-400">Overview of your Multi-Bot RAG system.</p>
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {statCards.map((stat) => (
-          <div key={stat.name} className="flex items-center rounded-lg border bg-white p-6 shadow-sm">
+          <div key={stat.name} className="flex items-center rounded-lg border border-gray-200 dark:border-navy-deep bg-white dark:bg-card p-6 shadow-sm">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-info">
               <stat.icon className="h-6 w-6 text-blue-600" />
             </div>
             <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500">{stat.name}</p>
-              <h3 className="text-2xl font-semibold text-navy">{stat.value}</h3>
+              <p className="text-sm font-medium text-gray-500 dark:text-gray-400">{stat.name}</p>
+              <h3 className="text-2xl font-semibold text-navy dark:text-white">{stat.value}</h3>
             </div>
           </div>
         ))}
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <div className="rounded-lg border bg-white p-6 shadow-sm">
-          <h3 className="text-base font-semibold text-navy mb-4">Usage Trend (Requests)</h3>
+        <div className="rounded-lg border border-gray-200 dark:border-navy-deep bg-white dark:bg-card p-6 shadow-sm">
+          <h3 className="text-base font-semibold text-navy dark:text-white mb-4">Usage Trend (Requests)</h3>
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={trend}>
@@ -96,8 +96,8 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        <div className="rounded-lg border bg-white p-6 shadow-sm">
-          <h3 className="text-base font-semibold text-navy mb-4">Cost by Bot (USD)</h3>
+        <div className="rounded-lg border border-gray-200 dark:border-navy-deep bg-white dark:bg-card p-6 shadow-sm">
+          <h3 className="text-base font-semibold text-navy dark:text-white mb-4">Cost by Bot (USD)</h3>
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={costByBot}>

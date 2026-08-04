@@ -4,24 +4,30 @@ exposing publicly (see core/security.py).
 """
 from datetime import datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
-from app.api.deps import get_vector_store, require_admin
+from pydantic import BaseModel
+
+from app.api.deps import get_current_user, get_llm_client, get_vector_store, require_admin
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.time_filters import resolve_range
+from app.assistant.admin_assistant import ask_admin_assistant
+from app.assistant.prompt_improver import improve_system_prompt
 from app.bots import config_writer
 from app.bots.registry import registry
 from app.bots.schema import BotConfig
 from app.core.config import get_settings
 from app.core.exceptions import ConfigError, UpstreamError
+from app.core.security import User
 from app.db.models import SyncState
 from app.db.repositories import usage_repository as usage
 from app.db.repositories import user_repository as users_repo
-from app.db.repositories.chat_repository import search_chats
+from app.db.repositories.chat_repository import feedback_counts_by_bot, search_chats
 from app.db.repositories.log_repository import search_events
 from app.db.session import get_session
+from app.llm.base import LLMClient
 from app.workers.sync_scheduler import sync_one_bot
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -38,14 +44,16 @@ def list_bots() -> list[dict]:
     # field to a default on save.
     return [{
         "id": b.id, "name": b.name, "route": b.route, "enabled": b.enabled,
-        "sharepointSite": b.sharepoint.site_url,
-        "sharepointLibraries": b.sharepoint.libraries,
+        "contentType": b.content_type,
+        "sharepointSites": [{"siteUrl": s.site_url, "libraries": s.libraries, "lists": s.lists} for s in b.sharepoint.sites],
         "qdrantCollection": b.vectorstore.collection,
         "llmModel": b.models.llm,
         "embeddingModel": b.models.embedding,
         "indexingSchedule": b.indexing.schedule,
         "systemPrompt": b.prompt.system,
         "access": {"allowed_groups": b.access.allowed_groups},
+        "responseFields": [{"name": f.name, "prompt": f.prompt} for f in b.response_fields],
+        "includeCategory": b.include_category,
     } for b in registry.all()]
 
 
@@ -62,16 +70,39 @@ def index_status(bot_id: str | None = None, db: Session = Depends(get_session)) 
     for s in db.scalars(select(SyncState)):
         states_by_bot.setdefault(s.bot_id, []).append(s)
 
+    feedback_by_bot = feedback_counts_by_bot(db)
+
     result = []
     for bot in bots:
         stats = store.index_stats(bot.vectorstore.collection)
         states = states_by_bot.get(bot.id, [])
-        last_run = max((s.last_run_at for s in states if s.last_run_at), default=None)
+        # MIN across libraries, not MAX, and only once every configured
+        # library has a row with a real last_run_at - a bot with N libraries
+        # gets a separate SyncState row per library, each updated
+        # independently as that library finishes. Using MAX meant this
+        # flipped to a real timestamp the moment the FASTEST library
+        # finished, which is what the admin-portal's sync-status polling
+        # (bots/page.tsx) uses to decide "done" - so a multi-library sync
+        # looked complete (and doc/chunk counts looked final) the instant
+        # the first library finished, while the rest were still indexing in
+        # the background. MIN only advances once the slowest/last library
+        # is also done, and doubles as a more honest "how stale is this bot"
+        # value in general (a bot is only as fresh as its stalest library).
+        # A bot only ever populates one of libraries/lists (see BotConfig.
+        # content_type), so summing both here just counts "sync units"
+        # generically without needing to branch on content_type.
+        total_libraries = sum(len(site.libraries) + len(site.lists) for site in bot.sharepoint.sites)
+        all_libraries_synced = bool(states) and len(states) >= total_libraries \
+            and all(s.last_run_at is not None for s in states)
+        last_run = min((s.last_run_at for s in states), default=None) if all_libraries_synced else None
+        fb = feedback_by_bot.get(bot.id, {"likes": 0, "dislikes": 0})
         result.append({
             "bot_id": bot.id,
             "documents_indexed": stats["documents"],
             "chunks_indexed": stats["chunks"],
             "last_sync_at": last_run.isoformat() if last_run else None,
+            "likes": fb["likes"],
+            "dislikes": fb["dislikes"],
         })
     return result
 
@@ -111,14 +142,28 @@ def list_available_models() -> dict:
         model = (d.get("model") or "").lower()
         if not name:
             continue
-        (embedding if "embedding" in model else llm).append(name)
+        # get_llm_client() (app/api/deps.py) picks the embedding backend
+        # globally from settings.embedding_backend - a bot's models.embedding
+        # field is never actually consulted to choose which embedder runs.
+        # When embedding_backend=local, any Azure embedding deployment
+        # (e.g. text-embedding-3-small, left over from before local
+        # embeddings were adopted) is real but unusable: picking it in the
+        # form would save a bot config that claims one model while every
+        # document/query is still silently embedded with the local model.
+        # So only list Azure embedding deployments here when they're the
+        # backend actually in effect.
+        if "embedding" in model:
+            if s.embedding_backend == "azure_openai":
+                embedding.append(name)
+        else:
+            llm.append(name)
 
     # Azure OpenAI only lists ITS OWN deployments - the locally-run embedding
-    # model (when embedding_backend=local) isn't an Azure deployment, so it
-    # would never appear here otherwise, and the form couldn't offer the
-    # model that's actually configured on every bot. Use the bare model name
-    # (strip the "BAAI/" org prefix) - that's what bot YAMLs and usage_logs
-    # store; LOCAL_EMBEDDING_MODEL's full HF id is only needed to load it.
+    # model isn't an Azure deployment, so it would never appear above, and
+    # the form couldn't offer the model that's actually configured on every
+    # bot. Use the bare model name (strip the "BAAI/" org prefix) - that's
+    # what bot YAMLs and usage_logs store; LOCAL_EMBEDDING_MODEL's full HF id
+    # is only needed to load it.
     if s.embedding_backend == "local":
         local_name = s.local_embedding_model.split("/")[-1]
         if local_name not in embedding:
@@ -145,6 +190,25 @@ def sharepoint_libraries(site_url: str, tenant: str = "veelead-development") -> 
     except Exception as exc:
         raise UpstreamError(f"Failed to resolve SharePoint site/libraries: {exc}") from exc
     return sorted(drives.keys())
+
+
+@router.get("/sharepoint/lists")
+def sharepoint_lists(site_url: str, tenant: str = "veelead-development") -> list[str]:
+    """List the real SharePoint Lists at a site (excluding document libraries
+    and hidden system lists - see SharePointClient.resolve_lists) - powers a
+    List bot's form the same way sharepoint_libraries() powers a Library
+    bot's."""
+    from app.ingestion.sharepoint_client import SharePointClient
+    from app.ingestion.tenant_resolver import resolve_tenant
+
+    creds = resolve_tenant(tenant)
+    client = SharePointClient(creds.tenant_id, creds.client_id, creds.client_secret)
+    try:
+        site_id = client.resolve_site(site_url)
+        lists = client.resolve_lists(site_id)
+    except Exception as exc:
+        raise UpstreamError(f"Failed to resolve SharePoint site/lists: {exc}") from exc
+    return sorted(lists.keys())
 
 
 @router.post("/bots")
@@ -268,8 +332,10 @@ def chat_history(bot_id: str | None = None, user_id: str | None = None,
                         keyword=keyword, limit=limit)
     return [{"id": r.id, "bot_id": r.bot_id, "user_id": r.user_id, "user_email": r.user_email,
              "question": r.question, "answer": r.answer, "model": r.model,
+             "prompt_tokens": r.prompt_tokens, "completion_tokens": r.completion_tokens,
              "total_tokens": r.total_tokens, "cost_usd": r.cost_usd,
-             "response_time_ms": r.response_time_ms, "created_at": r.created_at.isoformat()}
+             "response_time_ms": r.response_time_ms, "created_at": r.created_at.isoformat(),
+             "feedback": r.feedback}
             for r in rows]
 
 
@@ -282,3 +348,32 @@ def logs(type: str | None = None, bot_id: str | None = None,
          db: Session = Depends(get_session)) -> list[dict]:
     s, e = resolve_range(period, start, end)
     return search_events(db, type=type, bot_id=bot_id, start=s, end=e, limit=limit)
+
+
+# ---------- admin analytics assistant ----------
+
+class AssistantAskRequest(BaseModel):
+    question: str
+
+
+@router.post("/assistant/ask")
+def assistant_ask(payload: AssistantAskRequest, user: User = Depends(get_current_user),
+                  llm: LLMClient = Depends(get_llm_client),
+                  db: Session = Depends(get_session)) -> dict:
+    answer = ask_admin_assistant(db, payload.question, llm, user.id)
+    return {"answer": answer}
+
+
+class ImprovePromptRequest(BaseModel):
+    prompt: str
+
+
+@router.post("/bots/improve-prompt")
+def improve_prompt(payload: ImprovePromptRequest, user: User = Depends(get_current_user),
+                   llm: LLMClient = Depends(get_llm_client),
+                   db: Session = Depends(get_session)) -> dict:
+    try:
+        improved = improve_system_prompt(db, payload.prompt, llm, user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"improved_prompt": improved}

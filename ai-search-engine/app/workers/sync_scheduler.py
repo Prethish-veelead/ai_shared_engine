@@ -11,6 +11,8 @@ from app.workers.sync_job import (
     build_sharepoint_client,
     reset_delta_tokens,
     resolve_drive_ids,
+    resolve_list_ids,
+    run_list_sync,
     run_sync,
 )
 
@@ -27,11 +29,17 @@ def sync_one_bot(bot_id: str, full: bool = False) -> None:
     try:
         bot = registry.get_any(bot_id)   # allow disabled bots: their content can still be kept synced
         sp = build_sharepoint_client(bot)            # per-tenant credentials
-        drive_id_for = resolve_drive_ids(bot, sp)    # site_url + libraries -> ids
         with _session_factory()() as db:
-            if full:
-                reset_delta_tokens(db, bot)
-            run_sync(bot, db, drive_id_for, sp=sp)
+            if bot.content_type == "list":
+                # List bots always do a full re-pull (see run_list_sync) - the
+                # "full" flag only matters for library bots' delta tokens.
+                list_id_for = resolve_list_ids(bot, sp)
+                run_list_sync(bot, db, list_id_for, sp=sp)
+            else:
+                drive_id_for = resolve_drive_ids(bot, sp)    # site_url + libraries -> ids
+                if full:
+                    reset_delta_tokens(db, bot)
+                run_sync(bot, db, drive_id_for, sp=sp)
         log.info("%s complete for bot '%s'", "Reindex" if full else "Sync", bot_id)
     except Exception as exc:
         log.exception("Sync FAILED for bot '%s' (other bots unaffected)", bot_id)

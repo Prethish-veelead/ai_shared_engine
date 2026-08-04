@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     embedding_backend: str = "azure_openai"  # azure_openai | local
     local_embedding_model: str = "BAAI/bge-base-en-v1.5"  # used when embedding_backend=local
 
+    # --- List bot structured query layer (app/rag/structured/) ---
+    structured_query_max_tool_rounds: int = 5   # cap on LLM<->tool round trips per question
+    structured_query_row_limit: int = 200       # cap on rows a single tool call can return
+
+    # --- Temporary, non-persisted chat history (app/rag/history.py) ---
+    # The browser resends recent turns with each /ask call; this bounds how
+    # many of them the backend will actually use, regardless of how many the
+    # client sends - latency/cost/context-window protection, not a session
+    # limit (there is no session to limit).
+    chat_history_max_messages: int = 8
+
     # --- Entra ID auth (Job B: user sign-in) ---
     auth_enabled: bool = True                # False = local dev bypass (see below)
     auth_tenant: str = "veelead-development"  # which tenant's users may sign in

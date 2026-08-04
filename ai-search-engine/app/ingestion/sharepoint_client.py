@@ -27,6 +27,12 @@ class ChangedItem:
     fields: dict | None = None   # SharePoint column values (Status, Category, ...)
 
 
+@dataclass
+class ListItem:
+    item_id: str            # listItem id (stable within its list)
+    fields: dict             # column values - IS the content, unlike a file
+
+
 class SharePointClient:
     def __init__(self, tenant_id: str, client_id: str, client_secret: str):
         self._tenant_id = tenant_id
@@ -76,6 +82,52 @@ class SharePointClient:
         resp = requests.get(url, headers=headers, timeout=60)
         resp.raise_for_status()
         return {d["name"]: d["id"] for d in resp.json().get("value", [])}
+
+    def resolve_lists(self, site_id: str) -> dict[str, str]:
+        """Return {list display name -> list id} for a site - genuine
+        SharePoint Lists only. Every document library is ALSO technically a
+        "list" in Graph's data model (list.template == "documentLibrary"),
+        and system lists like "Site Pages"/"Site Assets" are marked hidden -
+        both are filtered out so this only offers what an admin would
+        actually recognize as a List, and doesn't overlap with
+        resolve_drives()'s picker."""
+        import requests
+
+        headers = {"Authorization": f"Bearer {self._token()}"}
+        url = f"{GRAPH}/sites/{site_id}/lists?$select=id,displayName,list"
+        resp = requests.get(url, headers=headers, timeout=60)
+        resp.raise_for_status()
+        result = {}
+        for lst in resp.json().get("value", []):
+            info = lst.get("list") or {}
+            if info.get("hidden") or info.get("template") == "documentLibrary":
+                continue
+            result[lst["displayName"]] = lst["id"]
+        return result
+
+    def list_items(self, site_id: str, list_id: str) -> list[ListItem]:
+        """All current rows in a list, with column values expanded. No
+        delta/paging state kept between syncs - list-mode bots do a full
+        re-pull every sync (see sync_job.run_list_sync) since Lists are
+        typically small, so this always returns every current row rather
+        than only what changed."""
+        import requests
+
+        headers = {"Authorization": f"Bearer {self._token()}"}
+        url = f"{GRAPH}/sites/{site_id}/lists/{list_id}/items?$expand=fields"
+        items: list[ListItem] = []
+        next_link = url
+
+        while True:
+            resp = requests.get(next_link, headers=headers, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()
+            for it in data.get("value", []):
+                items.append(ListItem(item_id=it["id"], fields=it.get("fields", {})))
+            if "@odata.nextLink" in data:
+                next_link = data["@odata.nextLink"]
+                continue
+            return items
 
     def delta(self, drive_id: str, delta_link: str | None) -> tuple[list[ChangedItem], str]:
         """Return (changed_items, next_delta_link).

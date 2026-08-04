@@ -48,6 +48,19 @@ class QdrantVectorStore(VectorStore):
         )
         log.info("Deleted chunks for doc '%s' from '%s'", doc_id, collection)
 
+    def delete_stale(self, collection: str, field: str, value: str, keep_ids: list[str]) -> None:
+        from qdrant_client.models import FieldCondition, Filter, HasIdCondition, MatchValue
+
+        self._client.delete(
+            collection_name=collection,
+            points_selector=Filter(
+                must=[FieldCondition(key=field, match=MatchValue(value=value))],
+                must_not=[HasIdCondition(has_id=keep_ids)],
+            ),
+        )
+        log.info("Deleted stale chunks where %s='%s' (keeping %d point id(s)) from '%s'",
+                 field, value, len(keep_ids), collection)
+
     def delete_collection(self, collection: str) -> None:
         existing = {c.name for c in self._client.get_collections().collections}
         if collection in existing:

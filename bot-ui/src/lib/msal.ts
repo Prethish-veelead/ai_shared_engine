@@ -2,6 +2,7 @@ import {
   Configuration,
   EventType,
   InteractionRequiredAuthError,
+  InteractionType,
   PublicClientApplication,
 } from "@azure/msal-browser";
 
@@ -54,6 +55,22 @@ const INTERACTION_END_EVENTS: string[] = [
 let interactionInProgress = false;
 if (typeof window !== "undefined") {
   msalInstance.addEventCallback((event) => {
+    // ACQUIRE_TOKEN_START/SUCCESS/FAILURE fire for acquireTokenSilent() too,
+    // not just interactive redirects - event.eventType alone can't tell them
+    // apart. Without this interactionType check, a background silent token
+    // refresh from one caller could flip this flag off (or on) while a
+    // genuinely separate interactive redirect from another caller is still
+    // pending, letting two acquireTokenRedirect() calls race and throw
+    // interaction_in_progress - exactly what this flag exists to prevent.
+    // HANDLE_REDIRECT_START/END don't carry a meaningful interactionType
+    // (they fire once at startup for the redirect-return handshake), so
+    // those are always tracked regardless.
+    const isRedirectInteraction =
+      event.interactionType === InteractionType.Redirect ||
+      event.eventType === EventType.HANDLE_REDIRECT_START ||
+      event.eventType === EventType.HANDLE_REDIRECT_END;
+    if (!isRedirectInteraction) return;
+
     if (INTERACTION_START_EVENTS.includes(event.eventType)) {
       interactionInProgress = true;
     } else if (INTERACTION_END_EVENTS.includes(event.eventType)) {

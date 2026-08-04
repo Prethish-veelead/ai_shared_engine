@@ -1,8 +1,27 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #F4F6F9;
+  --foreground: #1E2A47;
+
+  /* Company Theme Palette - plain custom properties so the .dark overrides
+     below actually cascade. Tailwind's `@theme inline` bakes literal values
+     into the generated utility CSS at build time, so a token declared as a
+     literal hex *inside* @theme (e.g. `--color-navy: #1E2A47`) can never be
+     overridden by a later `.dark { --color-navy: ... }` rule - the compiled
+     .bg-navy/.text-navy/etc rules just keep the literal light-mode value.
+     Declaring the raw values here and referencing them via var() inside
+     @theme inline keeps the indirection intact, the same way --background/
+     --foreground already did. */
+  --navy: #1E2A47;
+  --navy-deep: #1B2A4A;
+  --info: #DCEAFB;
+  --success: #DFF5E3;
+  --warning: #FCEBD9;
+  --muted: #6E7686;
+  --card: #FFFFFF;
 }
 
 @theme inline {
@@ -10,13 +29,33 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  --color-navy: var(--navy);
+  --color-navy-deep: var(--navy-deep);
+  --color-orange: #F2811D;
+  --color-orange-hover: #E8730C;
+  --color-info: var(--info);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-muted: var(--muted);
+  --color-accent: #2C6FED;
+  --color-card: var(--card);
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  /* Default dark scheme (can be left empty since we use class-based strategy) */
+}
+
+.dark {
+  --background: #0F172A; /* Deep slate */
+  --foreground: #F8FAFC;
+  --navy: #0B1120; /* Darker navy for panels in dark mode */
+  --navy-deep: #020617; /* Even darker for deep borders */
+  --card: #1E293B; /* Slightly elevated card color */
+  --info: #1E3A8A;
+  --success: #14532D;
+  --warning: #78350F;
+  --muted: #94A3B8;
 }
 
 body {

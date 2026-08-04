@@ -3,5 +3,7 @@ from app.llm.base import ChatResult, LLMClient
 
 
 def generate(llm: LLMClient, *, system: str, user_message: str, model: str,
-             temperature: float) -> ChatResult:
-    return llm.chat(system=system, user=user_message, model=model, temperature=temperature)
+             temperature: float, json_mode: bool = False,
+             history: list[dict] | None = None) -> ChatResult:
+    return llm.chat(system=system, user=user_message, model=model, temperature=temperature,
+                     json_mode=json_mode, history=history)

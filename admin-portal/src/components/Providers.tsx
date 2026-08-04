@@ -6,6 +6,8 @@ import { msalInstance } from "@/lib/msal";
 import { createContext, useState, useContext, ReactNode, useEffect } from "react";
 import { AlertTriangle } from "lucide-react";
 
+import { ThemeProvider } from "next-themes";
+
 // Context to track 403 Forbidden states globally
 interface AuthErrorContextType {
   isForbidden: boolean;
@@ -30,7 +32,7 @@ function AuthGate({ children }: { children: ReactNode }) {
 
   if (inProgress !== InteractionStatus.None) {
     return (
-      <div className="flex h-screen w-full items-center justify-center text-sm text-gray-500">
+      <div className="flex h-screen w-full items-center justify-center bg-background text-sm text-gray-500 dark:text-gray-400">
         Loading…
       </div>
     );
@@ -49,29 +51,31 @@ export function Providers({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <MsalProvider instance={msalInstance}>
-      <AuthErrorContext.Provider value={{ isForbidden, setForbidden }}>
-        <AuthGate>{children}</AuthGate>
-        {isForbidden && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-            <div className="mx-4 max-w-md rounded-lg bg-white p-6 shadow-xl text-center">
-              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-100">
-                <AlertTriangle className="h-6 w-6 text-red-600" />
+    <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+      <MsalProvider instance={msalInstance}>
+        <AuthErrorContext.Provider value={{ isForbidden, setForbidden }}>
+          <AuthGate>{children}</AuthGate>
+          {isForbidden && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+              <div className="mx-4 max-w-md rounded-lg bg-white dark:bg-card p-6 shadow-xl text-center">
+                <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-100 dark:bg-red-500/10">
+                  <AlertTriangle className="h-6 w-6 text-red-600 dark:text-red-400" />
+                </div>
+                <h2 className="mb-2 text-xl font-bold text-navy dark:text-white">Admin Access Required</h2>
+                <p className="mb-6 text-sm text-gray-500 dark:text-gray-400">
+                  You are signed in, but your account does not have administrator privileges for this portal.
+                </p>
+                <button
+                  onClick={() => setForbidden(false)}
+                  className="w-full rounded-md bg-gray-900 dark:bg-gray-100 px-4 py-2 text-sm font-medium text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white"
+                >
+                  Dismiss
+                </button>
               </div>
-              <h2 className="mb-2 text-xl font-bold text-navy">Admin Access Required</h2>
-              <p className="mb-6 text-sm text-gray-500">
-                You are signed in, but your account does not have administrator privileges for this portal.
-              </p>
-              <button
-                onClick={() => setForbidden(false)}
-                className="w-full rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800"
-              >
-                Dismiss
-              </button>
             </div>
-          </div>
-        )}
-      </AuthErrorContext.Provider>
-    </MsalProvider>
+          )}
+        </AuthErrorContext.Provider>
+      </MsalProvider>
+    </ThemeProvider>
   );
 }

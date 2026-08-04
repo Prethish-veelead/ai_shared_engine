@@ -24,6 +24,9 @@ class AzureSearchVectorStore(VectorStore):
     def delete_by_doc(self, collection: str, doc_id: str) -> None:
         raise NotImplementedError
 
+    def delete_stale(self, collection: str, field: str, value: str, keep_ids: list[str]) -> None:
+        raise NotImplementedError
+
     def index_stats(self, collection: str) -> dict:
         raise NotImplementedError
 

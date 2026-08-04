@@ -39,6 +39,18 @@ class VectorStore(ABC):
         """Delete all chunks belonging to one source document (re-index step)."""
 
     @abstractmethod
+    def delete_stale(self, collection: str, field: str, value: str, keep_ids: list[str]) -> None:
+        """Delete every point whose payload[field] == value EXCEPT those
+        whose id is in keep_ids. Used after a full re-pull sync (list-mode
+        bots) to clean up rows removed from the source since the last sync:
+        called AFTER the fresh upsert (which uses deterministic per-row ids,
+        so re-syncing a still-existing row overwrites its old point rather
+        than duplicating it), passing the ids just written as keep_ids - so
+        a failure before this point leaves the previous sync's data fully
+        intact instead of wiping it up front and risking an empty bot if the
+        re-embed/upsert step then fails."""
+
+    @abstractmethod
     def delete_collection(self, collection: str) -> None:
         """Drop an entire collection (e.g. when its bot is deleted). No-op if
         the collection doesn't exist."""
