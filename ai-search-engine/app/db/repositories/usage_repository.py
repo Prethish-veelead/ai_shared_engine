@@ -29,7 +29,16 @@ def cost_by_bot(db: Session, bot_id=None, start=None, end=None) -> list[dict]:
     stmt = select(UsageLog.bot_id,
                   func.sum(UsageLog.total_tokens).label("tokens"),
                   func.sum(UsageLog.cost_usd).label("cost"),
-                  func.count().label("requests")).group_by(UsageLog.bot_id)
+                  # Only "chat" rows are real user requests - every /ask call
+                  # also writes a separate "embedding" UsageLog row (see
+                  # app/api/routes/ask.py's record_chat + record_embedding),
+                  # so a plain count() here double-counts requests. tokens/
+                  # cost above stay summed across BOTH kinds on purpose -
+                  # embeddings do cost tokens/money, they just aren't a
+                  # "request" on their own (same convention usage_trend()
+                  # below already follows).
+                  func.count().filter(UsageLog.kind == "chat").label("requests"),
+                  ).group_by(UsageLog.bot_id)
     stmt = _filter(stmt, UsageLog, bot_id, start, end)
     return [dict(r._mapping) for r in db.execute(stmt)]
 
@@ -76,6 +85,11 @@ def cost_by_user(db: Session, bot_id=None, start=None, end=None) -> list[dict]:
 
     for r in rows:
         r["email"] = emails.get(r["user_id"])
+    # No ORDER BY on the query above - GROUP BY's row order is otherwise
+    # whatever Postgres's aggregate plan happens to produce, not cost order.
+    # The admin portal's "Top Users by Cost" table renders this list as-is
+    # with no client-side sort, so it has to be sorted here.
+    rows.sort(key=lambda r: r["cost"] or 0, reverse=True)
     return rows
 
 

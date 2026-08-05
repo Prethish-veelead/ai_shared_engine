@@ -4,7 +4,8 @@ import { MsalProvider, useMsal } from "@azure/msal-react";
 import { InteractionStatus } from "@azure/msal-browser";
 import { msalInstance } from "@/lib/msal";
 import { createContext, useState, useContext, ReactNode, useEffect } from "react";
-import { AlertTriangle } from "lucide-react";
+import { DotLottiePlayer } from "@dotlottie/react-player";
+import "@dotlottie/react-player/dist/index.css";
 
 import { ThemeProvider } from "next-themes";
 
@@ -58,12 +59,11 @@ export function Providers({ children }: { children: ReactNode }) {
           {isForbidden && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
               <div className="mx-4 max-w-md rounded-lg bg-white dark:bg-card p-6 shadow-xl text-center">
-                <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-100 dark:bg-red-500/10">
-                  <AlertTriangle className="h-6 w-6 text-red-600 dark:text-red-400" />
+                <div className="mx-auto mb-2 h-40 w-40">
+                  <DotLottiePlayer src="/Error.json" autoplay loop className="w-full h-full object-contain" />
                 </div>
-                <h2 className="mb-2 text-xl font-bold text-navy dark:text-white">Admin Access Required</h2>
-                <p className="mb-6 text-sm text-gray-500 dark:text-gray-400">
-                  You are signed in, but your account does not have administrator privileges for this portal.
+                <p className="mb-6 text-sm font-medium text-gray-500 dark:text-gray-400">
+                  You don&apos;t have access. Please contact admin.
                 </p>
                 <button
                   onClick={() => setForbidden(false)}
