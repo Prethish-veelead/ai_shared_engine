@@ -102,7 +102,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 value={currentBotId || ""}
                 onChange={(e) => {
                   if (e.target.value) {
-                    router.push(`/bot/${e.target.value}`);
+                    // Hard navigation, not router.push: bot-ui is statically
+                    // exported with only ONE built page for the [botId]
+                    // segment (see page.tsx's generateStaticParams) - there's
+                    // no Next.js server at runtime to soft-navigate to a
+                    // param value that was never actually built. FastAPI's
+                    // explicit /bot/{bot_id} fallback route (app/main.py)
+                    // handles any id correctly, but only via a real request.
+                    window.location.href = `/bot/${e.target.value}`;
                   } else {
                     router.push("/");
                   }
@@ -167,7 +174,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   <select
                     value={currentBotId || ""}
                     onChange={(e) => {
-                      if (e.target.value) router.push(`/bot/${e.target.value}`);
+                      // Hard navigation - see the desktop switcher above for why.
+                      if (e.target.value) window.location.href = `/bot/${e.target.value}`;
                       setDropdownOpen(false);
                     }}
                     className="w-full bg-gray-50 dark:bg-navy-deep border border-gray-200 dark:border-gray-700 text-navy dark:text-white text-sm rounded-lg focus:ring-orange focus:border-orange block p-2"
