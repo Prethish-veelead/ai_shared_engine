@@ -49,6 +49,8 @@ export interface Bot {
   // Free: read straight off the top-cited chunk's SharePoint Category
   // column metadata, no extra LLM call.
   includeCategory?: boolean;
+  // Shown as clickable starter prompts in bot-ui's empty chat state.
+  sampleQuestions?: string[];
 }
 
 export interface ChatHistoryRow {
@@ -343,6 +345,7 @@ function toBotConfigPayload(botId: string, data: Partial<Bot>) {
     },
     response_fields: (data.responseFields || []).map((f) => ({ name: f.name, prompt: f.prompt })),
     include_category: data.includeCategory ?? false,
+    sample_questions: (data.sampleQuestions || []).map((q) => q.trim()).filter((q) => q.length > 0),
   };
 }
 

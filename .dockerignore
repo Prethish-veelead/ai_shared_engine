@@ -1,0 +1,52 @@
+# Build context is the repo root (docker-compose.yml build.context: ../..)
+# since the Dockerfile builds admin-portal + bot-ui + ai-search-engine into
+# one image (docs/SINGLE_ORIGIN_DEPLOY.md).
+#
+# Every pattern below is **/-prefixed to match at ANY depth unambiguously -
+# a bare pattern like "node_modules/" was tried first and did NOT exclude
+# admin-portal/node_modules or bot-ui/node_modules (verified: build context
+# was 2.72GB, matching the on-disk size of node_modules+.next+venv combined,
+# meaning none of it was actually filtered). Also listed by exact path as a
+# second safety net.
+
+# Backend: only requirements.txt, app/, config/, scripts/ are ever COPYed.
+**/venv/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+ai-search-engine/venv/
+ai-search-engine/evals/
+ai-search-engine/loadtest/
+ai-search-engine/tests/
+
+# Frontends: only the source the Dockerfile's npm ci/build stage needs -
+# node_modules and prior build output are regenerated inside the image, not
+# reused from the host, and are typically the largest thing here.
+**/node_modules/
+**/.next/
+**/out/
+admin-portal/node_modules/
+admin-portal/.next/
+bot-ui/node_modules/
+bot-ui/.next/
+
+# Never meant to reach an image, regardless of directory.
+docs/
+**/*.log
+.git/
+*.png
+
+# Only the BACKEND's real secrets file is excluded. admin-portal/.env.local
+# and bot-ui/.env.local contain NEXT_PUBLIC_* values ONLY - inherently public
+# (they're baked straight into the browser JS bundle by design, e.g. the
+# Entra client_id) - and MUST reach `next build`, or Next.js silently inlines
+# empty strings for them. A blanket **/.env* pattern here previously did
+# exactly that: verified the built admin-portal JS had `clientId:""`, which
+# is why MSAL sign-in failed with AADSTS900144 (missing client_id).
+ai-search-engine/.env
+
+# IDE/editor cruft.
+**/.vscode/
+**/.idea/

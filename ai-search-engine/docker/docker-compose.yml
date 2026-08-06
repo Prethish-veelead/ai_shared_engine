@@ -1,8 +1,11 @@
 services:
   api:
     build:
-      context: ..
-      dockerfile: docker/Dockerfile
+      # Repo root, not ai-search-engine/ - the Dockerfile now also builds
+      # admin-portal and bot-ui into this same image (single-origin deploy,
+      # docs/SINGLE_ORIGIN_DEPLOY.md), so both need to be in the build context.
+      context: ../..
+      dockerfile: ai-search-engine/docker/Dockerfile
     env_file: ../.env
     ports:
       - "8000:8000"
@@ -12,11 +15,13 @@ services:
       - postgres
       - qdrant
 
-  # Runs scheduled SharePoint syncs, isolated from the API process.
+  # Runs scheduled SharePoint syncs, isolated from the API process. Shares the
+  # same image as api (built once, cached) even though it never serves the
+  # static frontends it also contains - same pattern as before this change.
   worker:
     build:
-      context: ..
-      dockerfile: docker/Dockerfile
+      context: ../..
+      dockerfile: ai-search-engine/docker/Dockerfile
     env_file: ../.env
     command: ["python", "-m", "app.workers.sync_scheduler"]
     volumes:

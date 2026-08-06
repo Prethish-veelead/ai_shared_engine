@@ -51,3 +51,8 @@ indexing:
   chunk_overlap: 100
 access:
   allowed_groups: []
+sample_questions:
+  - My laptop screen shows a blue error screen, what should I do?
+  - How do I fix Teams audio not working?
+  - My laptop is overheating, how can I fix it?
+  - What should I do if I suspect a ransomware attack?

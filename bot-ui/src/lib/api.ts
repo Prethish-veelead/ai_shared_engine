@@ -23,6 +23,9 @@ export interface Bot {
   name: string;
   route: string;
   enabled: boolean;
+  // Optional: a backend that predates this field (or is mid-rollout) simply
+  // omits it - never assume it's present.
+  sample_questions?: string[];
 }
 
 // Temporary, non-persisted conversation continuity (docs/CHAT_SESSIONS.md):

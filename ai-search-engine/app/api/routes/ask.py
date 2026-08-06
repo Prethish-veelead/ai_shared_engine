@@ -137,6 +137,7 @@ def list_accessible_bots(user: User = Depends(get_current_user)):
                 "id": bot.id,
                 "name": bot.name,
                 "route": bot.route,
-                "enabled": bot.enabled
+                "enabled": bot.enabled,
+                "sample_questions": bot.sample_questions,
             })
     return accessible_bots

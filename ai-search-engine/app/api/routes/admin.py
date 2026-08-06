@@ -57,6 +57,7 @@ def list_bots() -> list[dict]:
         "access": {"allowed_groups": b.access.allowed_groups},
         "responseFields": [{"name": f.name, "prompt": f.prompt} for f in b.response_fields],
         "includeCategory": b.include_category,
+        "sampleQuestions": b.sample_questions,
     } for b in registry.all()]
 
 

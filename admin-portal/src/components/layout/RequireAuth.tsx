@@ -6,6 +6,7 @@ import { LogIn } from "lucide-react";
 import { DotLottiePlayer } from "@dotlottie/react-player";
 import "@dotlottie/react-player/dist/index.css";
 import { getApiScope } from "@/lib/msal";
+import { BASE_PATH } from "@/lib/basePath";
 
 // Gates PAGE CONTENT (not the Sidebar/Header shell, which already shows its
 // own "Sign In" button) behind a real signed-in check. Providers.tsx's
@@ -27,7 +28,7 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
     return (
       <div className="flex h-full min-h-[60vh] flex-col items-center justify-center gap-4 text-center">
         <div className="h-48 w-48">
-          <DotLottiePlayer src="/login.json" autoplay loop className="w-full h-full object-contain" />
+          <DotLottiePlayer src={`${BASE_PATH}/login.json`} autoplay loop className="w-full h-full object-contain" />
         </div>
         <p className="text-sm text-gray-500 dark:text-gray-400">
           Sign in to view this page.

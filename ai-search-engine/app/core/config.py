@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     environment: str = "development"
     config_dir: Path = Path("config")
 
+    # --- Single-origin static frontends (docs/SINGLE_ORIGIN_DEPLOY.md) ---
+    # Built by the frontend-build Docker stage; absent in plain local `uvicorn`
+    # runs, which is fine - main.py only mounts a dir that actually exists.
+    admin_static_dir: Path = Path("app/static/admin")
+    root_static_dir: Path = Path("app/static/root")
+
     # --- Postgres (system of record: chat history, usage, config) ---
     postgres_dsn: str = "postgresql+psycopg://appuser:apppass@localhost:5432/aisearch"
 

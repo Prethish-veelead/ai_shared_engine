@@ -112,6 +112,11 @@ class BotConfig(BaseModel):
     # column metadata (already stored on every chunk at ingestion time), no
     # extra LLM call.
     include_category: bool = False
+    # Shown as clickable starter prompts in bot-ui's empty chat state, so a
+    # new user sees what this specific bot can actually answer instead of a
+    # blank box. Optional/additive - empty (the default) just means no
+    # suggestions are shown, same as today.
+    sample_questions: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _no_hybrid_sources(self) -> "BotConfig":

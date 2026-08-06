@@ -3,6 +3,7 @@
 import React from "react";
 import { DotLottiePlayer } from "@dotlottie/react-player";
 import "@dotlottie/react-player/dist/index.css";
+import { BASE_PATH } from "@/lib/basePath";
 
 interface LottieLoaderProps {
   message?: string;
@@ -17,7 +18,7 @@ export function LottieLoader({ message = "Loading...", size = 200 }: LottieLoade
         className="flex items-center justify-center relative"
       >
         <DotLottiePlayer
-          src="/login.json"
+          src={`${BASE_PATH}/login.json`}
           autoplay
           loop
           className="w-full h-full object-contain"

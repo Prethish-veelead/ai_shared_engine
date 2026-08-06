@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, Bot, AvailableModels, IndexStatus, deriveBotId } from "@/lib/api";
 import { useAuthReady } from "@/lib/useAuthReady";
 import { LottieLoader } from "@/components/ui/LottieLoader";
-import { Bot as BotIcon, Plus, Settings2, Trash2, Edit2, Play, Square, ExternalLink, RefreshCw, RotateCcw, ThumbsUp, ThumbsDown, Sparkles, Loader2 } from "lucide-react";
+import { Bot as BotIcon, Plus, Settings2, Trash2, Edit2, Play, Square, ExternalLink, RefreshCw, RotateCcw, ThumbsUp, ThumbsDown, Sparkles, Loader2, Braces } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // A bot can pull from more than one SharePoint site, each with its own set
@@ -66,6 +66,18 @@ function newResponseFieldBlock(): ResponseFieldBlock {
   return { key: crypto.randomUUID(), name: "", prompt: "" };
 }
 
+// Clickable starter prompts shown in bot-ui's empty chat state. Same
+// repeatable-block pattern as ResponseFieldBlock above - a block with an
+// empty text is just dropped on save, not blocking submission.
+interface SampleQuestionBlock {
+  key: string;
+  text: string;
+}
+
+function newSampleQuestionBlock(): SampleQuestionBlock {
+  return { key: crypto.randomUUID(), text: "" };
+}
+
 export default function BotsPage() {
   const [bots, setBots] = useState<Bot[]>([]);
   const [loading, setLoading] = useState(true);
@@ -79,6 +91,8 @@ export default function BotsPage() {
   const [formError, setFormError] = useState("");
   const [responseFieldBlocks, setResponseFieldBlocks] = useState<ResponseFieldBlock[]>([]);
   const [includeCategory, setIncludeCategory] = useState(false);
+  const [sampleQuestionBlocks, setSampleQuestionBlocks] = useState<SampleQuestionBlock[]>([]);
+  const [showJsonPreview, setShowJsonPreview] = useState(false);
   const [contentType, setContentType] = useState<"library" | "list">("library");
   const authReady = useAuthReady();
 
@@ -142,6 +156,10 @@ export default function BotsPage() {
       (bot.responseFields || []).map((f) => ({ key: crypto.randomUUID(), name: f.name, prompt: f.prompt }))
     );
     setIncludeCategory(bot.includeCategory ?? false);
+    setSampleQuestionBlocks(
+      (bot.sampleQuestions || []).map((q) => ({ key: crypto.randomUUID(), text: q }))
+    );
+    setShowJsonPreview(false);
     setPromptBeforeImprove(null);
     setImproveError("");
     setNameInput(bot.name || "");
@@ -157,6 +175,8 @@ export default function BotsPage() {
     setFormError("");
     setResponseFieldBlocks([]);
     setIncludeCategory(false);
+    setSampleQuestionBlocks([]);
+    setShowJsonPreview(false);
     setPromptBeforeImprove(null);
     setImproveError("");
     setNameInput("");
@@ -206,6 +226,39 @@ export default function BotsPage() {
 
   function updateResponseField(key: string, patch: Partial<ResponseFieldBlock>) {
     setResponseFieldBlocks((prev) => prev.map((b) => (b.key === key ? { ...b, ...patch } : b)));
+  }
+
+  function addSampleQuestion() {
+    setSampleQuestionBlocks((prev) => [...prev, newSampleQuestionBlock()]);
+  }
+
+  function removeSampleQuestion(key: string) {
+    setSampleQuestionBlocks((prev) => prev.filter((b) => b.key !== key));
+  }
+
+  function updateSampleQuestion(key: string, text: string) {
+    setSampleQuestionBlocks((prev) => prev.map((b) => (b.key === key ? { ...b, text } : b)));
+  }
+
+  // Mirrors AskResponse (ai-search-engine/app/api/routes/ask.py) - the fixed
+  // base fields every bot returns, plus whatever this bot's currently
+  // configured response_fields/include_category add on top. Recomputed from
+  // live form state so the preview always matches what Save would send.
+  function buildResponseJsonPreview(): Record<string, unknown> {
+    const shape: Record<string, unknown> = {
+      answer: "string",
+      citations: [{ index: 0, source: "string", page: 0 }],
+      model: "string",
+      total_tokens: 0,
+      cost_usd: 0,
+      response_time_ms: 0,
+      chat_log_id: 0,
+    };
+    for (const b of responseFieldBlocks) {
+      if (b.name.trim()) shape[b.name.trim()] = "string";
+    }
+    if (includeCategory) shape.category = "string";
+    return shape;
   }
 
   function updateSiteBlock(key: string, patch: Partial<SiteBlock>) {
@@ -414,6 +467,9 @@ export default function BotsPage() {
         .filter((b) => b.name.trim().length > 0)
         .map((b) => ({ name: b.name.trim(), prompt: b.prompt.trim() })),
       includeCategory,
+      sampleQuestions: sampleQuestionBlocks
+        .map((b) => b.text.trim())
+        .filter((text) => text.length > 0),
     };
 
     if (isEditing) {
@@ -786,19 +842,69 @@ export default function BotsPage() {
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Sample Questions (optional)</label>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    Shown as clickable starter prompts when a user opens this bot for the first time.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={addSampleQuestion}
+                  className="shrink-0 text-sm font-medium text-orange hover:text-orange-hover"
+                >
+                  + Add a question
+                </button>
+              </div>
+              {sampleQuestionBlocks.map((block) => (
+                <div key={block.key} className="flex items-center gap-2">
+                  <input
+                    value={block.text}
+                    onChange={(e) => updateSampleQuestion(block.key, e.target.value)}
+                    className="block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none"
+                    placeholder="e.g. How do I fix Teams audio not working?"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeSampleQuestion(block.key)}
+                    className="shrink-0 text-xs font-medium text-red-600 dark:text-red-400 hover:underline"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Response Fields (optional)</label>
                   <p className="text-xs text-gray-500 dark:text-gray-400">
                     Extra fields added to this bot&apos;s answer, on top of the standard ones. Generated in the same request - no extra cost or delay.
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={addResponseField}
-                  className="shrink-0 text-sm font-medium text-orange hover:text-orange-hover"
-                >
-                  + Add another field
-                </button>
+                <div className="flex shrink-0 items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowJsonPreview((v) => !v)}
+                    title="Preview the /ask response JSON structure this bot would return"
+                    className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-500 dark:text-gray-400 hover:text-orange"
+                  >
+                    <Braces className="h-3.5 w-3.5" />
+                    {showJsonPreview ? "Hide JSON" : "Preview JSON"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={addResponseField}
+                    className="text-sm font-medium text-orange hover:text-orange-hover"
+                  >
+                    + Add another field
+                  </button>
+                </div>
               </div>
+              {showJsonPreview && (
+                <pre className="overflow-x-auto rounded-md border border-gray-300 dark:border-navy-deep bg-gray-50 dark:bg-navy-deep/50 p-3 text-xs text-navy dark:text-gray-200">
+                  {JSON.stringify(buildResponseJsonPreview(), null, 2)}
+                </pre>
+              )}
               {responseFieldBlocks.map((block) => (
                 <div key={block.key} className="rounded-md border border-gray-300 dark:border-navy-deep p-3 space-y-2">
                   <div className="flex items-center justify-between gap-2">

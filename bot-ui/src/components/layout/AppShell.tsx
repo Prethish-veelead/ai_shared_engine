@@ -79,17 +79,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-screen flex-col bg-background">
       <header className="flex h-16 shrink-0 items-center justify-between border-b border-gray-200 dark:border-navy-deep bg-white dark:bg-navy px-4 sm:px-6 shadow-sm z-10">
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2 font-black tracking-tight text-navy dark:text-white text-xl">
+        <div className="flex items-center gap-4 min-w-0">
+          <div className="flex items-center gap-2 font-black tracking-tight text-navy dark:text-white text-xl shrink-0">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-orange text-white shadow-sm">
               <Bot className="h-5 w-5" />
             </div>
-            <span>Veelead AI</span>
+            <span className="hidden sm:inline">Veelead AI</span>
           </div>
+
+          {/* Active assistant name - shown here, not as a separate card below
+              the header (see bot/[botId]/page.tsx) */}
+          {activeBot && (
+            <div className="flex min-w-0 items-center border-l border-gray-200 dark:border-gray-700 pl-4">
+              <span className="truncate text-base font-bold text-navy dark:text-white">{activeBot.name}</span>
+            </div>
+          )}
 
           {/* Bot Switcher */}
           {bots.length > 0 && (
-            <div className="hidden sm:flex items-center ml-4 border-l border-gray-200 dark:border-gray-700 pl-4">
+            <div className="hidden sm:flex items-center ml-2 border-l border-gray-200 dark:border-gray-700 pl-4">
               <select
                 value={currentBotId || ""}
                 onChange={(e) => {
