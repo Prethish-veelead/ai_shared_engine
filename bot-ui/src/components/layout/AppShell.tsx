@@ -7,7 +7,7 @@ import { Bot, LogOut, ChevronDown, Sun, Moon, Monitor } from "lucide-react";
 import { useEffect, useState, useRef } from "react";
 import { useTheme } from "next-themes";
 import { api, Bot as BotType } from "@/lib/api";
-import { useRouter, useParams, usePathname } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 
 function getInitials(name: string) {
@@ -17,20 +17,24 @@ function getInitials(name: string) {
   return name.substring(0, 2).toUpperCase();
 }
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+// currentBotId is a prop, not next/navigation's useParams() - this is a
+// static export with no live Next.js server, and useParams() reads Next's
+// own client router state, which stays frozen at the single synthetic id
+// generateStaticParams built ("_shell") regardless of the real URL
+// (verified empirically). ChatClient resolves the real id itself from
+// window.location.pathname and passes it down here; the root page (no bot
+// selected) simply doesn't pass one.
+export function AppShell({ children, currentBotId }: { children: React.ReactNode; currentBotId?: string }) {
   const { instance, accounts, inProgress } = useMsal();
   const isAuthenticated = useIsAuthenticated();
   const [mounted, setMounted] = useState(false);
   const { theme, setTheme } = useTheme();
-  
+
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
-  
+
   const [bots, setBots] = useState<BotType[]>([]);
   const router = useRouter();
-  const params = useParams();
-  const pathname = usePathname();
-  const currentBotId = params?.botId as string | undefined;
 
   useEffect(() => {
     setMounted(true);

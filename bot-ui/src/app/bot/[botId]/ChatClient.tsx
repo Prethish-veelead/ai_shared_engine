@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { useParams } from "next/navigation";
 import { AppShell } from "@/components/layout/AppShell";
 import { api, Bot as BotType, Citation, HistoryTurn } from "@/lib/api";
 import { Send, Bot, User, Loader2, AlertCircle, ThumbsUp, ThumbsDown } from "lucide-react";
@@ -31,17 +30,23 @@ const HISTORY_CLIENT_SEND_CAP = 16;
 // Component) because generateStaticParams there requires a non-"use client"
 // file, and this component is fully "use client".
 //
-// botId comes from useParams(), NOT a prop passed down from page.tsx. A
-// value resolved in the Server Component and passed as a prop gets baked
-// into the static HTML/RSC payload at export time - every bot's page would
-// literally hydrate with the hardcoded string "_shell" (confirmed by
-// inspecting the built output). useParams() is a CLIENT hook that re-derives
-// the current dynamic segment from the real, live browser URL on every
-// load/navigation - this is what actually makes serving one static shell
-// for any bot id work correctly.
+// botId is read directly from window.location.pathname, NOT from a prop
+// passed down from page.tsx and NOT from next/navigation's useParams().
+// Both of those derive from Next's own client-side router state, which for
+// a page built from generateStaticParams's single synthetic "_shell" entry
+// stays "_shell" FOREVER, regardless of the real browser URL - verified
+// empirically (a debug log showed useParams() reporting "_shell" while
+// window.location.pathname correctly showed "/bot/it"). This is a purely
+// static export served by FastAPI's own fallback route (app/main.py) for
+// ANY bot id, known or not - there is no live Next.js server to resolve
+// params/router state against the real URL, only the raw browser URL itself
+// is trustworthy.
 export function ChatClient() {
-  const params = useParams<{ botId: string }>();
-  const botId = params.botId;
+  const [botId, setBotId] = useState("");
+  useEffect(() => {
+    const segments = window.location.pathname.split("/").filter(Boolean);
+    setBotId(segments[1] || "");
+  }, []);
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -163,7 +168,7 @@ export function ChatClient() {
   const sampleQuestions = currentBot?.sample_questions ?? [];
 
   return (
-    <AppShell>
+    <AppShell currentBotId={botId || undefined}>
       <div className="flex h-full flex-col bg-gray-50/30 dark:bg-navy-deep/20">
         {/* Chat Area */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 relative">

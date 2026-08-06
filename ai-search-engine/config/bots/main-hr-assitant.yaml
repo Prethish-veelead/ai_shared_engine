@@ -11,7 +11,7 @@ sharepoint:
     libraries:
     - HD_KnowledgeDocuments
     lists: []
-  status_column: Status
+  status_column: ArticleStatus
   published_value: Published
   category_column: Category
   subcategory_column: SubCategory
