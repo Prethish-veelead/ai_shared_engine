@@ -3,12 +3,13 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import Lottie from "lottie-react";
+import { BASE_PATH } from "@/lib/basePath";
 
 export default function NotFound() {
   const [animationData, setAnimationData] = useState<object | null>(null);
 
   useEffect(() => {
-    fetch("/404-error.json")
+    fetch(`${BASE_PATH}/404-error.json`)
       .then((res) => res.json())
       .then(setAnimationData)
       .catch(() => setAnimationData(null));

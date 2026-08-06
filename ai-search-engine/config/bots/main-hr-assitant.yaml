@@ -1,0 +1,36 @@
+id: main-hr-assitant
+name: main hr assitant
+route: /ask/hr main
+enabled: true
+content_type: library
+structured_store: true
+sharepoint:
+  tenant: veelead-solutions
+  sites:
+  - site_url: https://veeleadsolutions.sharepoint.com/sites/Data/Helpdesk
+    libraries:
+    - HD_KnowledgeDocuments
+    lists: []
+  status_column: Status
+  published_value: Published
+  category_column: Category
+  subcategory_column: SubCategory
+vectorstore:
+  collection: main-hr-assitant
+models:
+  llm: gpt-4o-mini
+  embedding: bge-base-en-v1.5
+prompt:
+  system: 'you are an hr assitant
+
+    hi i need response like chatgpt only get data form the given document'
+  temperature: 0.2
+indexing:
+  schedule: 0 2 * * *
+  chunk_size: 800
+  chunk_overlap: 100
+access:
+  allowed_groups: []
+response_fields: []
+include_category: false
+sample_questions: []

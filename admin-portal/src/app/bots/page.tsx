@@ -493,6 +493,8 @@ export default function BotsPage() {
     setPromptBeforeImprove(null);
     setImproveError("");
     setIncludeCategory(false);
+    setSampleQuestionBlocks([]);
+    setShowJsonPreview(false);
     setNameInput("");
     setRouteInput("");
   }

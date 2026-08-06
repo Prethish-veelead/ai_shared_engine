@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { useParams } from "next/navigation";
 import { AppShell } from "@/components/layout/AppShell";
 import { api, Bot as BotType, Citation, HistoryTurn } from "@/lib/api";
 import { Send, Bot, User, Loader2, AlertCircle, ThumbsUp, ThumbsDown } from "lucide-react";
@@ -28,10 +29,20 @@ const HISTORY_CLIENT_SEND_CAP = 16;
 
 // All the actual chat UI/behavior - split out from page.tsx (a Server
 // Component) because generateStaticParams there requires a non-"use client"
-// file, and this component is fully "use client". botId now arrives as a
-// plain prop (resolved server-side from the route params in page.tsx)
-// instead of being read here via the `use()` hook.
-export function ChatClient({ botId }: { botId: string }) {
+// file, and this component is fully "use client".
+//
+// botId comes from useParams(), NOT a prop passed down from page.tsx. A
+// value resolved in the Server Component and passed as a prop gets baked
+// into the static HTML/RSC payload at export time - every bot's page would
+// literally hydrate with the hardcoded string "_shell" (confirmed by
+// inspecting the built output). useParams() is a CLIENT hook that re-derives
+// the current dynamic segment from the real, live browser URL on every
+// load/navigation - this is what actually makes serving one static shell
+// for any bot id work correctly.
+export function ChatClient() {
+  const params = useParams<{ botId: string }>();
+  const botId = params.botId;
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);

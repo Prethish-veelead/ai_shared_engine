@@ -7,9 +7,9 @@ structured_store: true
 sharepoint:
   tenant: veelead-solutions
   sites:
-  - site_url: https://veeleaddev.sharepoint.com/sites/AISearchDev
+  - site_url: https://veeleadsolutions.sharepoint.com/sites/Data/Helpdesk
     libraries:
-    - HR Knowledge Base
+    - HD_KnowledgeDocuments
     lists: []
   status_column: Status
   published_value: Published
@@ -111,7 +111,7 @@ access:
 response_fields: []
 include_category: false
 sample_questions:
-  - What happens during my first week as a new employee?
-  - How does the performance appraisal rating scale work?
-  - What is the resignation and offboarding process?
-  - What is a Performance Improvement Plan (PIP)?
+- What happens during my first week as a new employee?
+- How does the performance appraisal rating scale work?
+- What is the resignation and offboarding process?
+- What is a Performance Improvement Plan (PIP)?
