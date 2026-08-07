@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { AppShell } from "@/components/layout/AppShell";
 import { api, Bot as BotType, Citation, HistoryTurn } from "@/lib/api";
-import { Send, Bot, User, Loader2, AlertCircle, ThumbsUp, ThumbsDown } from "lucide-react";
+import { Send, Bot, User, Loader2, AlertCircle, ThumbsUp, ThumbsDown, Trash2, Copy, Check, Pencil } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface Message {
@@ -52,7 +52,9 @@ export function ChatClient() {
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const [currentBot, setCurrentBot] = useState<BotType | null>(null);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Next.js doesn't remount page.tsx on a dynamic-param change (only
   // template.tsx gets that), so without this the chat history and any
   // in-flight request from the previous bot would carry over when the
@@ -155,6 +157,29 @@ export function ChatClient() {
     }
   };
 
+  function handleClearChat() {
+    setMessages([]);
+    setInput("");
+  }
+
+  async function handleCopy(text: string, messageId: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedMessageId(messageId);
+      setTimeout(() => setCopiedMessageId((current) => (current === messageId ? null : current)), 1500);
+    } catch (error) {
+      console.error("Copy failed", error);
+    }
+  }
+
+  // Loads a previous question back into the input for editing - does not
+  // remove it or any later messages from the visible history, just gives
+  // the user a starting point to tweak and resend as a new turn.
+  function handleEditQuestion(text: string) {
+    setInput(text);
+    textareaRef.current?.focus();
+  }
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -172,6 +197,19 @@ export function ChatClient() {
       <div className="flex h-full flex-col bg-gray-50/30 dark:bg-navy-deep/20">
         {/* Chat Area */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 relative">
+          {messages.length > 0 && (
+            <div className="flex justify-end">
+              <button
+                onClick={handleClearChat}
+                title="Clear chat"
+                className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-gray-400 dark:text-gray-500 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-500/10 transition-colors"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Clear chat
+              </button>
+            </div>
+          )}
+
           {messages.length === 0 && (
             <div className="flex h-full items-center justify-center text-center">
               <div className="bg-white/50 dark:bg-navy/30 backdrop-blur-sm p-8 rounded-3xl border border-white/20 dark:border-white/5 shadow-xl max-w-md">
@@ -208,7 +246,7 @@ export function ChatClient() {
             <div
               key={msg.id}
               className={cn(
-                "flex max-w-[85%] sm:max-w-[75%] flex-col gap-2 relative",
+                "group flex max-w-[85%] sm:max-w-[75%] flex-col gap-2 relative",
                 msg.role === "user" ? "ml-auto items-end" : "mr-auto items-start"
               )}
             >
@@ -246,10 +284,45 @@ export function ChatClient() {
                 )}
               </div>
 
+              {/* Edit/copy - user messages only, revealed on hover */}
+              {msg.role === "user" && !msg.error && (
+                <div className="flex items-center gap-1 px-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <button
+                    onClick={() => handleEditQuestion(msg.content)}
+                    title="Edit and resend"
+                    className="rounded-md p-1 text-gray-400 dark:text-gray-500 hover:text-orange transition-colors"
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    onClick={() => handleCopy(msg.content, msg.id)}
+                    title="Copy question"
+                    className="rounded-md p-1 text-gray-400 dark:text-gray-500 hover:text-navy dark:hover:text-white transition-colors"
+                  >
+                    {copiedMessageId === msg.id ? (
+                      <Check className="h-3.5 w-3.5 text-emerald-500" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                </div>
+              )}
+
               {/* Metadata */}
               {msg.metadata && (
                 <div className="px-2 flex items-center gap-3 text-[11px] text-gray-400 dark:text-gray-500 font-medium">
                   <span>{msg.metadata.model} • {(msg.metadata.timeMs / 1000).toFixed(1)}s</span>
+                  <button
+                    onClick={() => handleCopy(msg.content, msg.id)}
+                    title="Copy answer"
+                    className="rounded-md p-1 text-gray-300 dark:text-gray-600 hover:text-navy dark:hover:text-white transition-colors"
+                  >
+                    {copiedMessageId === msg.id ? (
+                      <Check className="h-3.5 w-3.5 text-emerald-500" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                  </button>
                   {msg.chatLogId != null && (
                     <span className="flex items-center gap-1.5">
                       <button
@@ -296,6 +369,7 @@ export function ChatClient() {
         <div className="shrink-0 bg-white/70 dark:bg-navy/70 backdrop-blur-lg p-4 sm:p-6 border-t border-gray-200/50 dark:border-navy-deep/50 z-10">
           <div className="mx-auto max-w-4xl relative flex items-end overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-navy-deep shadow-inner focus-within:border-orange focus-within:ring-1 focus-within:ring-orange transition-all">
             <textarea
+              ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
