@@ -38,6 +38,10 @@ class ListCatalogEntry:
     list_name: str          # SharePoint display name - what the LLM refers to a list by
     table_name: str         # physical Postgres table (internal, never shown to the model)
     columns: list[ColumnInfo] = field(default_factory=list)
+    # The List's own SharePoint view page (not any one row's page) - every
+    # row-level/aggregate citation for this list links here, see
+    # _list_view_url below for how it's derived.
+    list_url: str | None = None
 
     def column_names(self) -> set[str]:
         return {c.name for c in self.columns}
@@ -51,9 +55,26 @@ class BotCatalog:
     bot_id: str
     lists: dict[str, ListCatalogEntry]              # keyed by list_name
     join_keys: dict[tuple[str, str], list[str]]     # (list_a, list_b) sorted -> shared column names
+    by_list_id: dict[str, ListCatalogEntry] = field(default_factory=dict)  # for citation lookups keyed by payload's list_id (semantic_search)
 
     def get(self, list_name: str) -> ListCatalogEntry | None:
         return self.lists.get(list_name)
+
+
+def _list_view_url(row_url: str) -> str | None:
+    """Derive a SharePoint List's own default view page from one of its
+    rows' item URL: ".../Lists/{List}/{item}_.000" -> ".../Lists/{List}/
+    AllItems.aspx". Every row in a synced list shares this same base path,
+    so any one non-null source_url is enough - no separate Graph call or
+    stored column needed. This is SharePoint's standard default-view
+    filename, not itself Graph-verified per site; if a tenant's list view
+    genuinely lives elsewhere this comes back wrong rather than failing
+    loudly, so a mismatch here needs a real Graph-based fix later, not
+    something to silently trust forever."""
+    if "/Lists/" not in row_url:
+        return None
+    base = row_url.rsplit("/", 1)[0]
+    return f"{base}/AllItems.aspx"
 
 
 def build_catalog(bot_id: str, db: Session) -> BotCatalog:
@@ -64,7 +85,9 @@ def build_catalog(bot_id: str, db: Session) -> BotCatalog:
     registry_rows = db.execute(select(ListTable).where(ListTable.bot_id == bot_id)).scalars().all()
 
     lists: dict[str, ListCatalogEntry] = {}
+    by_list_id: dict[str, ListCatalogEntry] = {}
     for row in registry_rows:
+        qtable = db.get_bind().dialect.identifier_preparer.quote(row.table_name)
         col_rows = db.execute(
             text("SELECT column_name, data_type FROM information_schema.columns "
                  "WHERE table_schema = 'public' AND table_name = :t "
@@ -77,6 +100,9 @@ def build_catalog(bot_id: str, db: Session) -> BotCatalog:
         ).all()
         columns = [ColumnInfo(name=c.column_name, sql_type=c.data_type) for c in col_rows]
 
+        sample_url = db.execute(text(f"SELECT source_url FROM {qtable} WHERE source_url IS NOT NULL LIMIT 1")).scalar()
+        list_url = _list_view_url(sample_url) if sample_url else None
+
         if row.list_name in lists:
             # Two lists (different list_id, e.g. from different sites) sharing
             # a display name - a real but rare edge case, out of scope to
@@ -84,9 +110,11 @@ def build_catalog(bot_id: str, db: Session) -> BotCatalog:
             # the catalog just keeps the last one seen.
             log.warning("Bot %s: two lists both named %r in the registry - "
                         "catalog keeps only one of them", bot_id, row.list_name)
-        lists[row.list_name] = ListCatalogEntry(
-            list_name=row.list_name, table_name=row.table_name, columns=columns,
+        entry = ListCatalogEntry(
+            list_name=row.list_name, table_name=row.table_name, columns=columns, list_url=list_url,
         )
+        lists[row.list_name] = entry
+        by_list_id[row.list_id] = entry
 
     join_keys: dict[tuple[str, str], list[str]] = {}
     names = sorted(lists)
@@ -96,7 +124,7 @@ def build_catalog(bot_id: str, db: Session) -> BotCatalog:
             if shared:
                 join_keys[(a, b)] = shared
 
-    return BotCatalog(bot_id=bot_id, lists=lists, join_keys=join_keys)
+    return BotCatalog(bot_id=bot_id, lists=lists, join_keys=join_keys, by_list_id=by_list_id)
 
 
 def render_catalog_for_prompt(catalog: BotCatalog) -> str:

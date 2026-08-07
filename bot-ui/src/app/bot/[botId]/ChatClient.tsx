@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import Lottie from "lottie-react";
+import ReactMarkdown from "react-markdown";
 import { AppShell } from "@/components/layout/AppShell";
 import { api, Bot as BotType, Citation, HistoryTurn } from "@/lib/api";
 import { Send, Bot, User, AlertCircle, ThumbsUp, ThumbsDown, Trash2, Copy, Check, Pencil, ExternalLink } from "lucide-react";
@@ -12,6 +13,49 @@ import { cn } from "@/lib/utils";
 // from feeling stuck on one static line.
 const GENERATING_PHRASES = ["Thinking...", "Searching documents...", "Reviewing sources...", "Generating response..."];
 const GENERATING_PHRASE_INTERVAL_MS = 1800;
+
+// One raw Citation per retrieved chunk means the same document can show up
+// several times (once per matched page) - collapse to one chip per unique
+// source, combining every page it matched into that one chip's label.
+// List-bot citations (no page field, already one-per-list from the backend)
+// pass through as a single-item group unchanged.
+interface CitationGroup {
+  source: string;
+  url: string | null;
+  pages: number[];
+}
+
+// Bot answers come back with real markdown (**bold**, numbered lists, ...)
+// but were rendered as plain text - defined once, outside the component, so
+// it isn't recreated on every render.
+const MARKDOWN_COMPONENTS = {
+  p: ({ children }: { children?: React.ReactNode }) => <p className="mb-2 last:mb-0">{children}</p>,
+  ul: ({ children }: { children?: React.ReactNode }) => <ul className="mb-2 ml-4 list-disc space-y-1 last:mb-0">{children}</ul>,
+  ol: ({ children }: { children?: React.ReactNode }) => <ol className="mb-2 ml-4 list-decimal space-y-1 last:mb-0">{children}</ol>,
+  code: ({ children }: { children?: React.ReactNode }) => (
+    <code className="rounded bg-black/5 dark:bg-white/10 px-1 py-0.5 text-[13px]">{children}</code>
+  ),
+  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
+    <a href={href} target="_blank" rel="noopener noreferrer" className="underline">
+      {children}
+    </a>
+  ),
+};
+
+function groupCitations(citations: Citation[]): CitationGroup[] {
+  const groups = new Map<string, CitationGroup>();
+  for (const c of citations) {
+    let group = groups.get(c.source);
+    if (!group) {
+      group = { source: c.source, url: c.url, pages: [] };
+      groups.set(c.source, group);
+    }
+    if (c.page !== null && c.page !== undefined && !group.pages.includes(c.page)) {
+      group.pages.push(c.page);
+    }
+  }
+  return Array.from(groups.values()).map((g) => ({ ...g, pages: g.pages.sort((a, b) => a - b) }));
+}
 
 interface Message {
   id: string;
@@ -61,6 +105,10 @@ export function ChatClient() {
   const [isTyping, setIsTyping] = useState(false);
   const [currentBot, setCurrentBot] = useState<BotType | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  // Which user message is currently being edited in place (Claude/ChatGPT-
+  // style edit), and its draft text - at most one at a time.
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
   // Which bot message currently has its "what went wrong?" comment box open
   // (dislike-only "Learning loop") - at most one at a time.
   const [commentDraftFor, setCommentDraftFor] = useState<string | null>(null);
@@ -122,8 +170,11 @@ export function ChatClient() {
 
   // Accepts an explicit question (used by the sample-question chips below,
   // which send immediately on click) or falls back to whatever's typed in
-  // the input box.
-  const handleSend = async (question?: string) => {
+  // the input box. `historyBase`, when passed (only by handleSaveEdit
+  // below), replaces `messages` as the base to build on - this is what lets
+  // an edited resend truncate everything after the edited message instead
+  // of just appending a new turn at the end.
+  const handleSend = async (question?: string, historyBase?: Message[]) => {
     const text = (question ?? input).trim();
     if (!text || isTyping) return;
 
@@ -134,18 +185,27 @@ export function ChatClient() {
       content: text,
     };
 
+    const priorMessages = historyBase ?? messages;
+
     // Temporary, non-persisted history (docs/CHAT_SESSIONS.md): built from
     // this in-memory `messages` state, sent with the request, and never
     // written anywhere else - a refresh/tab close just loses it, by design.
     // The backend trims to its own window authoritatively; this client-side
     // cap just keeps the request body from growing unbounded in a very long
     // session.
-    const history: HistoryTurn[] = messages
+    const history: HistoryTurn[] = priorMessages
       .filter((m) => !m.error)
       .slice(-HISTORY_CLIENT_SEND_CAP)
       .map((m) => ({ role: m.role === "user" ? "user" : "assistant", content: m.content }));
 
-    setMessages((prev) => [...prev, userMessage]);
+    if (historyBase) {
+      // Editing an earlier message: replace state with the truncated
+      // history + the resubmitted message, discarding that message's old
+      // text and everything that came after it (its old answer included).
+      setMessages([...historyBase, userMessage]);
+    } else {
+      setMessages((prev) => [...prev, userMessage]);
+    }
     setInput("");
     setIsTyping(true);
 
@@ -232,12 +292,30 @@ export function ChatClient() {
     }
   }
 
-  // Loads a previous question back into the input for editing - does not
-  // remove it or any later messages from the visible history, just gives
-  // the user a starting point to tweak and resend as a new turn.
-  function handleEditQuestion(text: string) {
-    setInput(text);
-    textareaRef.current?.focus();
+  // In-place edit (Claude/ChatGPT-style): turns the message bubble itself
+  // into an editable box, rather than copying its text into the bottom
+  // input - see handleSaveEdit for what happens on submit.
+  function handleStartEdit(msg: Message) {
+    setEditingMessageId(msg.id);
+    setEditingText(msg.content);
+  }
+
+  function handleCancelEdit() {
+    setEditingMessageId(null);
+    setEditingText("");
+  }
+
+  // Drops the edited message and everything after it (its old answer
+  // included), then resends the new text as if the conversation had ended
+  // right before it - so the thread shows only the edited version, not both.
+  function handleSaveEdit(msg: Message) {
+    const text = editingText.trim();
+    if (!text || isTyping) return;
+    const index = messages.findIndex((m) => m.id === msg.id);
+    const historyBase = index === -1 ? messages : messages.slice(0, index);
+    setEditingMessageId(null);
+    setEditingText("");
+    handleSend(text, historyBase);
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -318,10 +396,47 @@ export function ChatClient() {
                     : "bg-white/90 dark:bg-card/90 text-navy dark:text-gray-100 border border-gray-100/50 dark:border-navy-deep/50 rounded-2xl rounded-bl-sm"
                 )}
               >
-                {msg.error ? (
+                {msg.role === "user" && editingMessageId === msg.id ? (
+                  <div className="flex w-72 flex-col gap-2 sm:w-96">
+                    <textarea
+                      value={editingText}
+                      onChange={(e) => setEditingText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          handleSaveEdit(msg);
+                        } else if (e.key === "Escape") {
+                          handleCancelEdit();
+                        }
+                      }}
+                      rows={2}
+                      autoFocus
+                      className="w-full resize-none rounded-lg border border-white/30 bg-white/10 px-3 py-2 text-sm text-white placeholder:text-white/50 focus:outline-none focus:border-white/60"
+                    />
+                    <div className="flex justify-end gap-2">
+                      <button
+                        onClick={handleCancelEdit}
+                        className="rounded-lg px-3 py-1 text-xs font-medium text-white/70 hover:bg-white/10 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => handleSaveEdit(msg)}
+                        disabled={!editingText.trim()}
+                        className="rounded-lg bg-white/20 px-3 py-1 text-xs font-semibold text-white hover:bg-white/30 disabled:opacity-50 transition-colors"
+                      >
+                        Save &amp; Submit
+                      </button>
+                    </div>
+                  </div>
+                ) : msg.error ? (
                   <div className="flex items-center gap-2 text-rose-500">
                     <AlertCircle className="h-5 w-5" />
                     <span className="font-medium">{msg.error}</span>
+                  </div>
+                ) : msg.role === "bot" ? (
+                  <div className="[&>*:last-child]:mb-0">
+                    <ReactMarkdown components={MARKDOWN_COMPONENTS}>{msg.content}</ReactMarkdown>
                   </div>
                 ) : (
                   <div className="whitespace-pre-wrap">{msg.content}</div>
@@ -330,9 +445,12 @@ export function ChatClient() {
                 {/* Citations */}
                 {msg.citations && msg.citations.length > 0 && (
                   <div className="mt-4 flex flex-wrap gap-2 pt-3 border-t border-black/5 dark:border-white/10">
-                    {msg.citations.map((cit, idx) => {
-                      const label = cit.source.split("/").pop() +
-                        (cit.page !== null && cit.page !== undefined ? ` (p.${cit.page})` : "");
+                    {groupCitations(msg.citations).map((cit, idx) => {
+                      const pageLabel =
+                        cit.pages.length === 0 ? "" :
+                        cit.pages.length === 1 ? ` (p.${cit.pages[0]})` :
+                        ` (pp. ${cit.pages.join(", ")})`;
+                      const label = cit.source.split("/").pop() + pageLabel;
                       const className =
                         "inline-flex items-center gap-1 rounded-lg bg-orange/10 dark:bg-orange/20 px-2.5 py-1 text-[11px] font-semibold text-orange-hover dark:text-orange border border-orange/20";
                       return cit.url ? (
@@ -358,11 +476,11 @@ export function ChatClient() {
               </div>
 
               {/* Edit/copy - user messages only, revealed on hover */}
-              {msg.role === "user" && !msg.error && (
+              {msg.role === "user" && !msg.error && editingMessageId !== msg.id && (
                 <div className="flex items-center gap-1 px-2 opacity-0 group-hover:opacity-100 transition-opacity">
                   <button
-                    onClick={() => handleEditQuestion(msg.content)}
-                    title="Edit and resend"
+                    onClick={() => handleStartEdit(msg)}
+                    title="Edit message"
                     className="rounded-md p-1 text-gray-400 dark:text-gray-500 hover:text-orange transition-colors"
                   >
                     <Pencil className="h-3.5 w-3.5" />
@@ -485,11 +603,11 @@ export function ChatClient() {
               placeholder="Ask a question..."
               className="max-h-32 min-h-[60px] w-full resize-none bg-transparent py-4 pl-5 pr-14 text-sm focus:outline-none text-navy dark:text-white placeholder:text-gray-400"
               rows={1}
-              disabled={isTyping}
+              disabled={isTyping || editingMessageId !== null}
             />
             <button
               onClick={() => handleSend()}
-              disabled={!input.trim() || isTyping}
+              disabled={!input.trim() || isTyping || editingMessageId !== null}
               className="absolute bottom-2 right-2 flex h-11 w-11 items-center justify-center rounded-xl bg-orange text-white transition-all hover:bg-orange-hover hover:scale-105 disabled:bg-gray-100 dark:disabled:bg-gray-800 disabled:text-gray-400 disabled:hover:scale-100 shadow-sm"
             >
               <Send className="h-5 w-5" />

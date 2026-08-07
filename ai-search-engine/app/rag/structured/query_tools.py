@@ -62,14 +62,14 @@ def _quote(db: Session, identifier: str) -> str:
     return db.get_bind().dialect.identifier_preparer.quote(identifier)
 
 
-def _row_citation(entry: ListCatalogEntry, row: dict, prefix: str = "") -> dict:
-    title_col, key_col = f"{prefix}title", f"{prefix}row_key"
-    label = row.get(title_col) or row.get(key_col) or "?"
-    # source_url is excluded from the catalog (never a real/joinable column -
-    # see catalog.py) but SELECT * (get_row/filter_rows) and join_lists'
-    # explicit column list below both still return it under this row-level
-    # name, so it's always readable here regardless of that exclusion.
-    return {"source": f"{entry.list_name}: {label}", "url": row.get(f"{prefix}source_url")}
+def _list_citation(entry: ListCatalogEntry) -> dict:
+    """One citation for the WHOLE list, not the individual row(s) a tool
+    call happened to touch - links to the list's own SharePoint view
+    (entry.list_url, see catalog.py) rather than any single row's page.
+    Every row-level/aggregate tool below cites its list(s) this same way,
+    so answers built from many rows still show one chip per list, not one
+    per row."""
+    return {"source": entry.list_name, "url": entry.list_url}
 
 
 def _build_where(db: Session, entry: ListCatalogEntry, filters: list[dict] | None,
@@ -114,7 +114,7 @@ def get_row(ctx: ToolContext, list: str, key_column: str, key_value: Any) -> dic
     sql = text(f"SELECT * FROM {qtable} WHERE lower(trim({qcol}::text)) = lower(trim(:v)) "
                f"LIMIT :lim")
     rows = [dict(r) for r in ctx.db.execute(sql, {"v": key_value, "lim": ctx.row_limit}).mappings().all()]
-    return {"rows": rows, "citations": [_row_citation(entry, r) for r in rows]}
+    return {"rows": rows, "citations": [_list_citation(entry)] if rows else []}
 
 
 def filter_rows(ctx: ToolContext, list: str, filters: list[dict] | None = None,
@@ -127,7 +127,7 @@ def filter_rows(ctx: ToolContext, list: str, filters: list[dict] | None = None,
     qtable = _quote(ctx.db, entry.table_name)
     sql = text(f"SELECT * FROM {qtable} WHERE {where_sql} LIMIT :lim")
     rows = [dict(r) for r in ctx.db.execute(sql, {**params, "lim": cap}).mappings().all()]
-    return {"rows": rows, "citations": [_row_citation(entry, r) for r in rows]}
+    return {"rows": rows, "citations": [_list_citation(entry)] if rows else []}
 
 
 def count_rows(ctx: ToolContext, list: str, filters: list[dict] | None = None) -> dict:
@@ -138,7 +138,7 @@ def count_rows(ctx: ToolContext, list: str, filters: list[dict] | None = None) -
     qtable = _quote(ctx.db, entry.table_name)
     sql = text(f"SELECT COUNT(*) AS value FROM {qtable} WHERE {where_sql}")
     value = ctx.db.execute(sql, params).scalar_one()
-    return {"value": value, "citations": [{"source": f"{entry.list_name}: exact count"}]}
+    return {"value": value, "citations": [_list_citation(entry)]}
 
 
 def aggregate(ctx: ToolContext, list: str, op: str, column: str | None = None,
@@ -162,11 +162,11 @@ def aggregate(ctx: ToolContext, list: str, op: str, column: str | None = None,
         sql = text(f"SELECT {qgroup} AS group_value, {agg_expr} AS value FROM {qtable} "
                    f"WHERE {where_sql} GROUP BY {qgroup} ORDER BY {qgroup}")
         results = [dict(r) for r in ctx.db.execute(sql, params).mappings().all()]
-        return {"results": results, "citations": [{"source": f"{entry.list_name}: grouped aggregate"}]}
+        return {"results": results, "citations": [_list_citation(entry)]}
 
     sql = text(f"SELECT {agg_expr} AS value FROM {qtable} WHERE {where_sql}")
     value = ctx.db.execute(sql, params).scalar_one()
-    return {"value": value, "citations": [{"source": f"{entry.list_name}: aggregate"}]}
+    return {"value": value, "citations": [_list_citation(entry)]}
 
 
 def join_lists(ctx: ToolContext, left: str, right: str, on: str,
@@ -193,22 +193,13 @@ def join_lists(ctx: ToolContext, left: str, right: str, on: str,
     qleft, qright, qon = _quote(ctx.db, left_entry.table_name), _quote(ctx.db, right_entry.table_name), _quote(ctx.db, on)
     left_select = ", ".join(f'l.{_quote(ctx.db, c)} AS "left_{c}"' for c in sorted(left_entry.column_names()))
     right_select = ", ".join(f'r.{_quote(ctx.db, c)} AS "right_{c}"' for c in sorted(right_entry.column_names()))
-    # source_url isn't in column_names() (excluded from the catalog entirely -
-    # see catalog.py), so it needs pulling in explicitly here for
-    # _row_citation's join-side lookup below to have anything to read.
-    qsrc = _quote(ctx.db, "source_url")
-    left_select += f', l.{qsrc} AS "left_source_url"'
-    right_select += f', r.{qsrc} AS "right_source_url"'
     sql = text(
         f"SELECT {left_select}, {right_select} FROM {qleft} l "
         f"JOIN {qright} r ON l.{qon} = r.{qon} "
         f"WHERE {left_where} AND {right_where} LIMIT :lim"
     )
     rows = [dict(r) for r in ctx.db.execute(sql, {**left_params, **right_params, "lim": cap}).mappings().all()]
-    citations = []
-    for row in rows:
-        citations.append(_row_citation(left_entry, row, prefix="left_"))
-        citations.append(_row_citation(right_entry, row, prefix="right_"))
+    citations = [_list_citation(left_entry), _list_citation(right_entry)] if rows else []
     return {"rows": rows, "citations": citations}
 
 
@@ -222,7 +213,7 @@ def distinct_values(ctx: ToolContext, list: str, column: str, limit: int = 100) 
     sql = text(f"SELECT DISTINCT {qcol} AS value FROM {qtable} WHERE {qcol} IS NOT NULL "
                f"ORDER BY {qcol} LIMIT :lim")
     values = [r.value for r in ctx.db.execute(sql, {"lim": cap})]
-    return {"values": values, "citations": [{"source": f"{entry.list_name}: distinct {col}"}]}
+    return {"values": values, "citations": [_list_citation(entry)]}
 
 
 def semantic_search(ctx: ToolContext, query: str, top_k: int = 5) -> dict:
@@ -236,8 +227,17 @@ def semantic_search(ctx: ToolContext, query: str, top_k: int = 5) -> dict:
     )
     results = [{"source": h.payload.get("source", "unknown"), "text": h.payload.get("text", ""),
                "score": h.score} for h in hits]
-    citations = [{"source": h.payload.get("source", "unknown"), "score": h.score,
-                 "url": h.payload.get("url")} for h in hits]
+    # Same list-level citation as every other tool here (not the row each
+    # hit came from) - looked up by the hit's list_id payload field since,
+    # unlike the SQL tools above, semantic_search never resolves a
+    # ListCatalogEntry through _resolve_list(). Falls back to the raw
+    # per-hit source/url if a hit's list_id isn't in the catalog (shouldn't
+    # normally happen - every indexed row's list is always in list_tables).
+    citations = []
+    for h in hits:
+        entry = ctx.catalog.by_list_id.get(h.payload.get("list_id"))
+        citations.append(_list_citation(entry) if entry else
+                         {"source": h.payload.get("source", "unknown"), "url": h.payload.get("url")})
     return {"results": results, "citations": citations, "embedding_tokens": embed_tokens}
 
 
