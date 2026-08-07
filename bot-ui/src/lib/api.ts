@@ -9,6 +9,12 @@ export interface Citation {
   url: string | null;
 }
 
+export interface ChartSpec {
+  type: "bar" | "pie" | "line" | "none";
+  labels?: string[];
+  values?: number[];
+}
+
 export interface AskResponse {
   answer: string;
   citations: Citation[];
@@ -17,6 +23,11 @@ export interface AskResponse {
   cost_usd: number;
   response_time_ms: number;
   chat_log_id: number;
+  // Both optional and bot-specific: only present when a bot's config
+  // (app/bots/schema.py's response_fields) defines a field with exactly
+  // this name - see docs on how to configure either one.
+  follow_up_questions?: string[];
+  chart?: ChartSpec;
 }
 
 export interface Bot {

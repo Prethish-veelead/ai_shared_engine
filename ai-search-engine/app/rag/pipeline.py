@@ -1,7 +1,6 @@
 """Orchestrates the full RAG flow for one question and returns everything the
 route needs to respond AND to log (answer, citations, tokens, timing).
 """
-import json
 import time
 from dataclasses import dataclass, field
 
@@ -10,16 +9,15 @@ from sqlalchemy.orm import Session
 
 from app.bots.schema import BotConfig
 from app.core.config import get_settings
-from app.core.logging import get_logger
 from app.db.models import ListTable
 from app.llm.base import LLMClient
 from app.rag.generator import generate
 from app.rag.history import trim_history
-from app.rag.prompt_builder import build_context, build_response_format_instruction, build_user_message
+from app.rag.prompt_builder import (
+    build_context, build_response_format_instruction, build_user_message, parse_response_fields,
+)
 from app.rag.retriever import Retriever
 from app.vectorstore.base import VectorStore
-
-log = get_logger(__name__)
 
 
 @dataclass
@@ -99,18 +97,7 @@ class RagPipeline:
         answer_text = chat.text
         extra_fields: dict = {}
         if wants_extra_fields:
-            try:
-                parsed = json.loads(chat.text)
-                answer_text = parsed.get("answer", chat.text)
-                for f in bot.response_fields:
-                    if f.name in parsed:
-                        extra_fields[f.name] = parsed[f.name]
-            except (json.JSONDecodeError, AttributeError):
-                # The model didn't return valid JSON this one time - fall
-                # back to the raw text as the answer rather than failing the
-                # whole request; the extra fields are just missing this once.
-                log.warning("Bot %s: expected JSON for extra response_fields, got: %r",
-                            bot.id, chat.text[:200])
+            answer_text, extra_fields = parse_response_fields(bot.id, chat.text, bot.response_fields)
 
         if bot.include_category and hits and "category" not in extra_fields:
             extra_fields["category"] = hits[0].payload.get("category")

@@ -66,9 +66,20 @@ class ResponseField(BaseModel):
     response_time_ms) - those never change shape for any bot. `prompt` tells
     the LLM what to generate for this field; it's produced in the SAME
     completion that generates the answer (see app/rag/prompt_builder.py),
-    not a second LLM call."""
+    not a second LLM call.
+
+    `type` only controls how the field is DESCRIBED to the model (a bare
+    "[]"/"{}" placeholder in the JSON shape it's asked to return, vs a
+    quoted string placeholder) - the backend never validates or coerces the
+    parsed value against this, it's passed through as whatever JSON the
+    model actually returned. Two field names are recognized specially by
+    bot-ui: "follow_up_questions" (array of strings, rendered as clickable
+    next-question chips) and "chart" (object, rendered as a bar/pie/line
+    chart) - see docs on how to configure each. Any other name just rides
+    along as an extra top-level AskResponse field, same as before."""
     name: str
     prompt: str
+    type: Literal["string", "array", "object"] = "string"
 
 
 # AskResponse's fixed base fields (app/api/routes/ask.py) - a response_fields

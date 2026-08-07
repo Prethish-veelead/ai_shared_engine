@@ -4,7 +4,8 @@ import { useState, useRef, useEffect } from "react";
 import Lottie from "lottie-react";
 import ReactMarkdown from "react-markdown";
 import { AppShell } from "@/components/layout/AppShell";
-import { api, Bot as BotType, Citation, HistoryTurn } from "@/lib/api";
+import { AnswerChart } from "@/components/chat/AnswerChart";
+import { api, Bot as BotType, ChartSpec, Citation, HistoryTurn } from "@/lib/api";
 import { Send, Bot, User, AlertCircle, ThumbsUp, ThumbsDown, Trash2, Copy, Check, Pencil, ExternalLink } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -71,6 +72,10 @@ interface Message {
   chatLogId?: number;
   feedback?: "like" | "dislike" | null;
   commentSubmitted?: boolean;
+  // Both bot-specific and optional - only present when the bot's config
+  // defines a response_fields entry named exactly "chart" / "follow_up_questions".
+  chart?: ChartSpec;
+  followUpQuestions?: string[];
 }
 
 // Client-side safety cap on how much history a single request body carries -
@@ -224,6 +229,8 @@ export function ChatClient() {
         botId: requestBotId,
         chatLogId: response.chat_log_id,
         feedback: null,
+        chart: response.chart,
+        followUpQuestions: response.follow_up_questions,
       };
       setMessages((prev) => [...prev, botMessage]);
     } catch (error: any) {
@@ -473,7 +480,29 @@ export function ChatClient() {
                     })}
                   </div>
                 )}
+
+                {/* Chart - only when this bot's response_fields includes one named "chart" */}
+                {msg.chart && <AnswerChart chart={msg.chart} />}
               </div>
+
+              {/* Follow-up question suggestions - only when this bot's response_fields
+                  includes one named "follow_up_questions", and only on the most recent
+                  message (an older one's suggestions are stale once the conversation moved on) */}
+              {msg.role === "bot" && msg.followUpQuestions && msg.followUpQuestions.length > 0 &&
+                msg.id === messages[messages.length - 1]?.id && (
+                <div className="flex flex-wrap gap-2 px-2">
+                  {msg.followUpQuestions.map((q, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => handleSend(q)}
+                      disabled={isTyping}
+                      className="rounded-full border border-gray-200 dark:border-navy-deep bg-white/70 dark:bg-navy-deep/50 px-3 py-1.5 text-xs text-navy dark:text-gray-200 hover:border-orange hover:bg-orange/5 dark:hover:bg-orange/10 transition-colors disabled:opacity-50"
+                    >
+                      {q}
+                    </button>
+                  ))}
+                </div>
+              )}
 
               {/* Edit/copy - user messages only, revealed on hover */}
               {msg.role === "user" && !msg.error && editingMessageId !== msg.id && (

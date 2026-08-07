@@ -13,7 +13,9 @@ from app.bots.schema import BotConfig
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.llm.base import LLMClient
+from app.rag.generator import generate
 from app.rag.history import build_messages
+from app.rag.prompt_builder import build_extra_fields_instruction, parse_extra_fields_only
 from app.rag.retriever import Retriever
 from app.rag.structured.catalog import build_catalog, render_catalog_for_prompt
 from app.rag.structured.query_tools import TOOL_SPECS, ToolContext, execute_tool
@@ -97,7 +99,6 @@ def answer_structured(bot: BotConfig, question: str, *, db: Session,
             "Bot %s: structured query loop hit the %d-round cap for %r - falling back to semantic search",
             bot.id, settings.structured_query_max_tool_rounds, question,
         )
-        from app.rag.generator import generate
         from app.rag.prompt_builder import build_context, build_user_message
 
         hits, embed_tok = retriever.retrieve(
@@ -115,13 +116,30 @@ def answer_structured(bot: BotConfig, question: str, *, db: Session,
         completion_tokens += chat.completion_tokens
         final_text = chat.text
 
+    answer_text = final_text or "I don't know."
+    extra_fields: dict = {}
+    # A separate, genuinely standalone completion - NOT spliced into the
+    # tool-calling conversation above - see build_extra_fields_instruction's
+    # docstring for why that's unsafe here (confirmed empirically to break
+    # tool selection on a working "count by department" question).
+    if bot.response_fields and final_text:
+        extra_chat = generate(
+            llm, system=build_extra_fields_instruction(bot.response_fields),
+            user_message=f"QUESTION: {question}\n\nANSWER: {final_text}",
+            model=bot.models.llm, temperature=bot.prompt.temperature, json_mode=True,
+        )
+        prompt_tokens += extra_chat.prompt_tokens
+        completion_tokens += extra_chat.completion_tokens
+        extra_fields = parse_extra_fields_only(bot.id, extra_chat.text, bot.response_fields)
+
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     return RagResponse(
-        answer=final_text or "I don't know.",
+        answer=answer_text,
         citations=_dedupe_citations(all_citations),
         model=bot.models.llm,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         embedding_tokens=embedding_tokens,
+        extra_fields=extra_fields,
         response_time_ms=elapsed_ms,
     )
