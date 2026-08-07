@@ -78,28 +78,24 @@ export function AppShell({ children, currentBotId }: { children: React.ReactNode
   }
 
   const account = accounts[0];
-  const activeBot = bots.find((b) => b.id === currentBotId);
 
   return (
     <div className="flex h-screen flex-col bg-background">
       <header className="flex h-16 shrink-0 items-center justify-between border-b border-gray-200 dark:border-navy-deep bg-white dark:bg-navy px-4 sm:px-6 shadow-sm z-10">
         <div className="flex items-center gap-4 min-w-0">
           <div className="flex items-center gap-2 font-black tracking-tight text-navy dark:text-white text-xl shrink-0">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-orange text-white shadow-sm">
-              <Bot className="h-5 w-5" />
+            {/* Veelead "VL" wordmark - same badge as admin-portal's Sidebar.tsx,
+                not a generic icon, so both apps carry the same brand mark. */}
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-white shadow-sm shrink-0">
+              <span className="text-base font-black tracking-tighter text-navy leading-none">V</span>
+              <span className="text-base font-black tracking-tighter text-orange leading-none -ml-0.5">L</span>
             </div>
             <span className="hidden sm:inline">Veelead AI</span>
           </div>
 
-          {/* Active assistant name - shown here, not as a separate card below
-              the header (see bot/[botId]/page.tsx) */}
-          {activeBot && (
-            <div className="flex min-w-0 items-center border-l border-gray-200 dark:border-gray-700 pl-4">
-              <span className="truncate text-base font-bold text-navy dark:text-white">{activeBot.name}</span>
-            </div>
-          )}
-
-          {/* Bot Switcher */}
+          {/* Bot Switcher - the dropdown's own selected value already shows
+              the active bot's name, so a separate label here would just
+              repeat it (see the requirement this came from). */}
           {bots.length > 0 && (
             <div className="hidden sm:flex items-center ml-2 border-l border-gray-200 dark:border-gray-700 pl-4">
               <select

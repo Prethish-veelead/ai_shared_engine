@@ -1,10 +1,17 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import Lottie from "lottie-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { api, Bot as BotType, Citation, HistoryTurn } from "@/lib/api";
-import { Send, Bot, User, Loader2, AlertCircle, ThumbsUp, ThumbsDown, Trash2, Copy, Check, Pencil } from "lucide-react";
+import { Send, Bot, User, AlertCircle, ThumbsUp, ThumbsDown, Trash2, Copy, Check, Pencil } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+// Cycled while waiting for an answer (see the isTyping block below) - purely
+// cosmetic, doesn't reflect real pipeline stages, just keeps a long wait
+// from feeling stuck on one static line.
+const GENERATING_PHRASES = ["Thinking...", "Searching documents...", "Reviewing sources...", "Generating response..."];
+const GENERATING_PHRASE_INTERVAL_MS = 1800;
 
 interface Message {
   id: string;
@@ -53,6 +60,8 @@ export function ChatClient() {
   const [isTyping, setIsTyping] = useState(false);
   const [currentBot, setCurrentBot] = useState<BotType | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [loadingAnimation, setLoadingAnimation] = useState<object | null>(null);
+  const [generatingPhraseIndex, setGeneratingPhraseIndex] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Next.js doesn't remount page.tsx on a dynamic-param change (only
@@ -84,6 +93,27 @@ export function ChatClient() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isTyping]);
+
+  useEffect(() => {
+    fetch("/loading.json")
+      .then((res) => res.json())
+      .then(setLoadingAnimation)
+      .catch(() => setLoadingAnimation(null));
+  }, []);
+
+  // Cycles the "Thinking... / Searching documents... / ..." text while
+  // waiting for an answer - resets to the first phrase each time a new
+  // request starts, rather than continuing from wherever the last one left off.
+  useEffect(() => {
+    if (!isTyping) {
+      setGeneratingPhraseIndex(0);
+      return;
+    }
+    const interval = setInterval(() => {
+      setGeneratingPhraseIndex((i) => (i + 1) % GENERATING_PHRASES.length);
+    }, GENERATING_PHRASE_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [isTyping]);
 
   // Accepts an explicit question (used by the sample-question chips below,
   // which send immediately on click) or falls back to whatever's typed in
@@ -358,8 +388,10 @@ export function ChatClient() {
 
           {isTyping && (
             <div className="mr-auto flex max-w-[75%] items-center gap-3 rounded-2xl rounded-bl-sm bg-white/80 dark:bg-card/80 backdrop-blur-md border border-gray-100/50 dark:border-navy-deep/50 px-5 py-4 text-sm text-gray-500 shadow-sm">
-              <Loader2 className="h-5 w-5 animate-spin text-orange" />
-              <span className="font-medium">Generating response...</span>
+              <div className="h-10 w-10 shrink-0">
+                {loadingAnimation && <Lottie animationData={loadingAnimation} loop autoplay />}
+              </div>
+              <span className="font-medium">{GENERATING_PHRASES[generatingPhraseIndex]}</span>
             </div>
           )}
           <div ref={messagesEndRef} className="h-4" />
