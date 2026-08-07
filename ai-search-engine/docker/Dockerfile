@@ -26,6 +26,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential tesseract-ocr && rm -rf /var/lib/apt/lists/*
 
 COPY ai-search-engine/requirements.txt .
+# CPU-only torch, installed BEFORE requirements.txt: sentence-transformers
+# depends on torch but only ever runs the embedding model on CPU here - left
+# unpinned, pip resolves the DEFAULT PyPI torch build, which is CUDA-enabled
+# and drags in several GB of nvidia-*-cu12 packages nothing in this image
+# ever uses (no GPU, no CUDA runtime). Installing the CPU wheel first means
+# it already satisfies sentence-transformers' "torch" dependency below, so
+# pip's normal -r requirements.txt install never touches/upgrades it back to
+# the CUDA build.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY ai-search-engine/app ./app
