@@ -15,6 +15,7 @@ from app.api.deps import get_current_user, get_pipeline
 from app.bots.registry import registry
 from app.core.security import ForbiddenError, User, can_access_bot
 from app.db.models import ChatLog
+from app.db.repositories.chat_repository import save_feedback_comment
 from app.db.session import get_session
 from app.rag.pipeline import RagPipeline
 from app.tracking.chat_history import save_chat
@@ -104,6 +105,10 @@ def ask(bot_id: str, body: AskRequest,
 class FeedbackRequest(BaseModel):
     chat_log_id: int
     feedback: Literal["like", "dislike"]
+    # Dislike-only free-text reason ("Learning loop" - docs mention). Ignored
+    # for "like" - a good answer doesn't need an explanation. Optional even
+    # on dislike: the thumbs-down itself is never blocked on providing one.
+    comment: str | None = None
 
 
 @router.post("/ask/{bot_id}/feedback")
@@ -123,6 +128,8 @@ def submit_feedback(bot_id: str, body: FeedbackRequest,
         raise HTTPException(status_code=403, detail="You can only give feedback on your own answers")
 
     chat_log.feedback = body.feedback
+    if body.feedback == "dislike" and body.comment and body.comment.strip():
+        save_feedback_comment(db, chat_log.id, body.comment.strip())
     db.commit()
     return {"chat_log_id": chat_log.id, "feedback": chat_log.feedback}
 

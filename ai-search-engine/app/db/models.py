@@ -38,6 +38,25 @@ class ChatLog(Base):
     feedback: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
+class ChatFeedbackComment(Base):
+    """Optional free-text reason attached to a dislike (bot-ui's "Learning
+    loop" feature) - kept in its own table, not a new column on ChatLog,
+    since this app's table-creation only ever creates NEW tables at startup
+    (Base.metadata.create_all()) and never ALTERs an existing one. A new
+    table needs no manual migration; a new column on chat_logs would.
+
+    One comment per chat log (unique chat_log_id) - a user can update it by
+    submitting again, not accumulate a thread of comments; this is meant to
+    capture "what went wrong" once, not be a discussion."""
+
+    __tablename__ = "chat_feedback_comments"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chat_log_id: Mapped[int] = mapped_column(BigInteger, index=True, unique=True)
+    comment: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class UsageLog(Base):
     """One row per billable AI call (chat OR embedding). Drives cost dashboards.
     Kept separate from ChatLog so embedding/ingestion cost is tracked too.

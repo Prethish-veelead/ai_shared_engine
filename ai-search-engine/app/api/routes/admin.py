@@ -24,7 +24,7 @@ from app.core.security import User
 from app.db.models import SyncState
 from app.db.repositories import usage_repository as usage
 from app.db.repositories import user_repository as users_repo
-from app.db.repositories.chat_repository import feedback_counts_by_bot, search_chats
+from app.db.repositories.chat_repository import feedback_comments_for, feedback_counts_by_bot, search_chats
 from app.db.repositories.log_repository import search_events
 from app.db.session import get_session
 from app.llm.base import LLMClient
@@ -346,12 +346,13 @@ def chat_history(bot_id: str | None = None, user_id: str | None = None,
     s, e = resolve_range(period, start, end)
     rows = search_chats(db, bot_id=bot_id, user_id=user_id, start=s, end=e,
                         keyword=keyword, limit=limit)
+    comments = feedback_comments_for(db, [r.id for r in rows])
     return [{"id": r.id, "bot_id": r.bot_id, "user_id": r.user_id, "user_email": r.user_email,
              "question": r.question, "answer": r.answer, "model": r.model,
              "prompt_tokens": r.prompt_tokens, "completion_tokens": r.completion_tokens,
              "total_tokens": r.total_tokens, "cost_usd": r.cost_usd,
              "response_time_ms": r.response_time_ms, "created_at": r.created_at.isoformat(),
-             "feedback": r.feedback}
+             "feedback": r.feedback, "feedback_comment": comments.get(r.id)}
             for r in rows]
 
 

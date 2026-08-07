@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { api, ChatHistoryRow, Bot } from "@/lib/api";
 import { useAuthReady } from "@/lib/useAuthReady";
 import { LottieLoader } from "@/components/ui/LottieLoader";
-import { Search, ChevronDown, ChevronUp, ThumbsUp, ThumbsDown } from "lucide-react";
+import { Search, ChevronDown, ChevronUp, ThumbsUp, ThumbsDown, MessageSquare } from "lucide-react";
 import { format } from "date-fns";
 import { cn, getInitials } from "@/lib/utils";
 
@@ -148,7 +148,12 @@ export default function HistoryPage() {
                       <span title="Liked"><ThumbsUp className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /></span>
                     )}
                     {row.feedback === "dislike" && (
-                      <span title="Disliked"><ThumbsDown className="h-4 w-4 text-rose-600 dark:text-rose-400" /></span>
+                      <span title={row.feedback_comment ? "Disliked, with a comment" : "Disliked"} className="relative">
+                        <ThumbsDown className="h-4 w-4 text-rose-600 dark:text-rose-400" />
+                        {row.feedback_comment && (
+                          <MessageSquare className="absolute -right-1.5 -top-1.5 h-2.5 w-2.5 fill-rose-600 text-rose-600 dark:fill-rose-400 dark:text-rose-400" />
+                        )}
+                      </span>
                     )}
                     <span className="text-xs text-gray-400 dark:text-gray-500 hidden sm:inline-block">
                       {format(new Date(row.created_at), "MMM d, HH:mm")}
@@ -173,6 +178,18 @@ export default function HistoryPage() {
                         {row.answer}
                       </div>
                     </div>
+
+                    {row.feedback === "dislike" && row.feedback_comment && (
+                      <div>
+                        <h4 className="text-xs font-semibold text-rose-500 dark:text-rose-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                          <MessageSquare className="h-3.5 w-3.5" />
+                          Dislike reason
+                        </h4>
+                        <div className="text-sm text-gray-700 dark:text-gray-300 bg-rose-50 dark:bg-rose-500/10 border border-rose-100 dark:border-rose-500/20 rounded-lg p-4 whitespace-pre-wrap">
+                          {row.feedback_comment}
+                        </div>
+                      </div>
+                    )}
 
                     <div className="flex items-center gap-6 pt-2 text-xs font-medium text-gray-500 dark:text-gray-400 flex-wrap">
                       <div className="flex items-center gap-1">

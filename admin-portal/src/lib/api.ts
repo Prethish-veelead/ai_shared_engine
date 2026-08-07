@@ -67,6 +67,9 @@ export interface ChatHistoryRow {
   response_time_ms: number;
   created_at: string;
   feedback: "like" | "dislike" | null;
+  // Optional dislike-only reason ("Learning loop") - null if none was given
+  // or a stale backend predates this field.
+  feedback_comment?: string | null;
 }
 
 export interface CostByBot {

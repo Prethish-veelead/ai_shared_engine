@@ -6,7 +6,7 @@ from datetime import datetime
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.db.models import ChatLog
+from app.db.models import ChatFeedbackComment, ChatLog
 
 
 def search_chats(db: Session, *, bot_id: str | None = None, user_id: str | None = None,
@@ -35,6 +35,28 @@ def search_chats(db: Session, *, bot_id: str | None = None, user_id: str | None 
         ))
     stmt = stmt.order_by(ChatLog.created_at.desc()).limit(limit).offset(offset)
     return list(db.scalars(stmt))
+
+
+def save_feedback_comment(db: Session, chat_log_id: int, comment: str) -> None:
+    """Insert or update the one comment allowed per chat log (see
+    ChatFeedbackComment's docstring) - resubmitting just replaces the text."""
+    existing = db.scalar(select(ChatFeedbackComment).where(ChatFeedbackComment.chat_log_id == chat_log_id))
+    if existing:
+        existing.comment = comment
+    else:
+        db.add(ChatFeedbackComment(chat_log_id=chat_log_id, comment=comment))
+
+
+def feedback_comments_for(db: Session, chat_log_ids: list[int]) -> dict[int, str]:
+    """{chat_log_id: comment} for whichever of the given ids actually have
+    one - a separate lookup rather than a join, same pattern as
+    usage_repository.cost_by_user's email lookup, to avoid the join
+    multiplying rows for anything that later becomes one-to-many."""
+    if not chat_log_ids:
+        return {}
+    stmt = select(ChatFeedbackComment.chat_log_id, ChatFeedbackComment.comment).where(
+        ChatFeedbackComment.chat_log_id.in_(chat_log_ids))
+    return dict(db.execute(stmt).all())
 
 
 def feedback_counts_by_bot(db: Session) -> dict[str, dict[str, int]]:

@@ -105,11 +105,12 @@ export const api = {
   },
 
   // Optional: nothing else about /ask changes if this is never called.
-  sendFeedback: async (botId: string, chatLogId: number, feedback: "like" | "dislike"): Promise<void> => {
+  // comment is dislike-only ("Learning loop") - ignored by the backend for "like".
+  sendFeedback: async (botId: string, chatLogId: number, feedback: "like" | "dislike", comment?: string): Promise<void> => {
     const response = await authFetch(`${API_BASE}/ask/${botId}/feedback`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_log_id: chatLogId, feedback }),
+      body: JSON.stringify({ chat_log_id: chatLogId, feedback, comment }),
     });
     await handleResponse<{ chat_log_id: number; feedback: string }>(response);
   }

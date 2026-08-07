@@ -26,6 +26,7 @@ interface Message {
   botId?: string;
   chatLogId?: number;
   feedback?: "like" | "dislike" | null;
+  commentSubmitted?: boolean;
 }
 
 // Client-side safety cap on how much history a single request body carries -
@@ -60,6 +61,10 @@ export function ChatClient() {
   const [isTyping, setIsTyping] = useState(false);
   const [currentBot, setCurrentBot] = useState<BotType | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  // Which bot message currently has its "what went wrong?" comment box open
+  // (dislike-only "Learning loop") - at most one at a time.
+  const [commentDraftFor, setCommentDraftFor] = useState<string | null>(null);
+  const [commentText, setCommentText] = useState("");
   const [loadingAnimation, setLoadingAnimation] = useState<object | null>(null);
   const [generatingPhraseIndex, setGeneratingPhraseIndex] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -181,11 +186,36 @@ export function ChatClient() {
     setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, feedback } : m)));
     try {
       await api.sendFeedback(msg.botId, msg.chatLogId, feedback);
+      // Dislike-only "Learning loop": offer an optional free-text reason
+      // right after the dislike registers, rather than blocking on it.
+      if (feedback === "dislike") {
+        setCommentText("");
+        setCommentDraftFor(msg.id);
+      }
     } catch (error) {
       console.error(error);
       setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, feedback: previous } : m)));
     }
   };
+
+  async function handleSubmitComment(msg: Message) {
+    const text = commentText.trim();
+    if (!msg.botId || msg.chatLogId == null || !text) return;
+    try {
+      await api.sendFeedback(msg.botId, msg.chatLogId, "dislike", text);
+      setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, commentSubmitted: true } : m)));
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setCommentDraftFor(null);
+      setCommentText("");
+    }
+  }
+
+  function handleSkipComment() {
+    setCommentDraftFor(null);
+    setCommentText("");
+  }
 
   function handleClearChat() {
     setMessages([]);
@@ -382,6 +412,40 @@ export function ChatClient() {
                     </span>
                   )}
                 </div>
+              )}
+
+              {/* Dislike comment box ("Learning loop") - optional, dislike-only */}
+              {commentDraftFor === msg.id && (
+                <div className="w-full max-w-sm rounded-xl border border-gray-200 dark:border-navy-deep bg-white dark:bg-card p-3 shadow-sm">
+                  <p className="mb-2 text-xs font-medium text-gray-500 dark:text-gray-400">
+                    What went wrong? (optional)
+                  </p>
+                  <textarea
+                    value={commentText}
+                    onChange={(e) => setCommentText(e.target.value)}
+                    placeholder="e.g. missed a detail, wrong source..."
+                    rows={2}
+                    className="w-full resize-none rounded-lg border border-gray-200 dark:border-navy-deep bg-gray-50 dark:bg-navy-deep/50 px-3 py-2 text-sm text-navy dark:text-white placeholder:text-gray-400 focus:outline-none focus:border-orange"
+                  />
+                  <div className="mt-2 flex justify-end gap-2">
+                    <button
+                      onClick={handleSkipComment}
+                      className="rounded-lg px-3 py-1.5 text-xs font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-navy-deep transition-colors"
+                    >
+                      Skip
+                    </button>
+                    <button
+                      onClick={() => handleSubmitComment(msg)}
+                      disabled={!commentText.trim()}
+                      className="rounded-lg bg-orange px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-hover disabled:opacity-50 transition-colors"
+                    >
+                      Submit
+                    </button>
+                  </div>
+                </div>
+              )}
+              {msg.commentSubmitted && commentDraftFor !== msg.id && (
+                <p className="px-2 text-[11px] text-gray-400 dark:text-gray-500">Thanks for the feedback.</p>
               )}
             </div>
           ))}
