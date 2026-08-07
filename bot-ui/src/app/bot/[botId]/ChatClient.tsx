@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from "react";
 import Lottie from "lottie-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { api, Bot as BotType, Citation, HistoryTurn } from "@/lib/api";
-import { Send, Bot, User, AlertCircle, ThumbsUp, ThumbsDown, Trash2, Copy, Check, Pencil } from "lucide-react";
+import { Send, Bot, User, AlertCircle, ThumbsUp, ThumbsDown, Trash2, Copy, Check, Pencil, ExternalLink } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // Cycled while waiting for an answer (see the isTyping block below) - purely
@@ -330,16 +330,29 @@ export function ChatClient() {
                 {/* Citations */}
                 {msg.citations && msg.citations.length > 0 && (
                   <div className="mt-4 flex flex-wrap gap-2 pt-3 border-t border-black/5 dark:border-white/10">
-                    {msg.citations.map((cit, idx) => (
-                      <span
-                        key={idx}
-                        className="inline-flex items-center rounded-lg bg-orange/10 dark:bg-orange/20 px-2.5 py-1 text-[11px] font-semibold text-orange-hover dark:text-orange border border-orange/20"
-                        title={cit.source}
-                      >
-                        {cit.source.split("/").pop()}
-                        {cit.page !== null && cit.page !== undefined ? ` (p.${cit.page})` : ""}
-                      </span>
-                    ))}
+                    {msg.citations.map((cit, idx) => {
+                      const label = cit.source.split("/").pop() +
+                        (cit.page !== null && cit.page !== undefined ? ` (p.${cit.page})` : "");
+                      const className =
+                        "inline-flex items-center gap-1 rounded-lg bg-orange/10 dark:bg-orange/20 px-2.5 py-1 text-[11px] font-semibold text-orange-hover dark:text-orange border border-orange/20";
+                      return cit.url ? (
+                        <a
+                          key={idx}
+                          href={cit.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className={`${className} hover:bg-orange/20 dark:hover:bg-orange/30 transition-colors`}
+                          title="View Source Document"
+                        >
+                          {label}
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      ) : (
+                        <span key={idx} className={className} title={cit.source}>
+                          {label}
+                        </span>
+                      );
+                    })}
                   </div>
                 )}
               </div>

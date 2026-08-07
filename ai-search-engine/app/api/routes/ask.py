@@ -42,6 +42,12 @@ class Citation(BaseModel):
     index: int
     source: str
     page: int | None = None
+    # SharePoint "view/open" link for this citation's document (library bots)
+    # or list row (list bots, row-level tools only) - absent for list-bot
+    # aggregate citations (count_rows/aggregate/distinct_values), which have
+    # no single record to link to. Frontend renders the citation as a plain
+    # label when this is None.
+    url: str | None = None
 
 
 class AskResponse(BaseModel):

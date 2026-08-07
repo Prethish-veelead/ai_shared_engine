@@ -65,7 +65,11 @@ def _quote(db: Session, identifier: str) -> str:
 def _row_citation(entry: ListCatalogEntry, row: dict, prefix: str = "") -> dict:
     title_col, key_col = f"{prefix}title", f"{prefix}row_key"
     label = row.get(title_col) or row.get(key_col) or "?"
-    return {"source": f"{entry.list_name}: {label}"}
+    # source_url is excluded from the catalog (never a real/joinable column -
+    # see catalog.py) but SELECT * (get_row/filter_rows) and join_lists'
+    # explicit column list below both still return it under this row-level
+    # name, so it's always readable here regardless of that exclusion.
+    return {"source": f"{entry.list_name}: {label}", "url": row.get(f"{prefix}source_url")}
 
 
 def _build_where(db: Session, entry: ListCatalogEntry, filters: list[dict] | None,
@@ -189,6 +193,12 @@ def join_lists(ctx: ToolContext, left: str, right: str, on: str,
     qleft, qright, qon = _quote(ctx.db, left_entry.table_name), _quote(ctx.db, right_entry.table_name), _quote(ctx.db, on)
     left_select = ", ".join(f'l.{_quote(ctx.db, c)} AS "left_{c}"' for c in sorted(left_entry.column_names()))
     right_select = ", ".join(f'r.{_quote(ctx.db, c)} AS "right_{c}"' for c in sorted(right_entry.column_names()))
+    # source_url isn't in column_names() (excluded from the catalog entirely -
+    # see catalog.py), so it needs pulling in explicitly here for
+    # _row_citation's join-side lookup below to have anything to read.
+    qsrc = _quote(ctx.db, "source_url")
+    left_select += f', l.{qsrc} AS "left_source_url"'
+    right_select += f', r.{qsrc} AS "right_source_url"'
     sql = text(
         f"SELECT {left_select}, {right_select} FROM {qleft} l "
         f"JOIN {qright} r ON l.{qon} = r.{qon} "
@@ -226,7 +236,8 @@ def semantic_search(ctx: ToolContext, query: str, top_k: int = 5) -> dict:
     )
     results = [{"source": h.payload.get("source", "unknown"), "text": h.payload.get("text", ""),
                "score": h.score} for h in hits]
-    citations = [{"source": h.payload.get("source", "unknown"), "score": h.score} for h in hits]
+    citations = [{"source": h.payload.get("source", "unknown"), "score": h.score,
+                 "url": h.payload.get("url")} for h in hits]
     return {"results": results, "citations": citations, "embedding_tokens": embed_tokens}
 
 

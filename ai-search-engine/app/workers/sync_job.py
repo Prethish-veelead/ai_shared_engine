@@ -142,6 +142,8 @@ def _metadata(item: ChangedItem, bot: BotConfig) -> dict:
     return {
         "category": fields.get(sp.category_column),
         "subcategory": fields.get(sp.subcategory_column),
+        # The file's own "open in browser" SharePoint page - citation click-through.
+        "url": item.web_url,
     }
 
 
@@ -242,6 +244,17 @@ def run_sync(bot: BotConfig, db: Session, drive_id_for: dict[int, dict[str, str]
                                 f"No download URL available for '{item.name}' "
                                 f"(doc_id={item.doc_id})"
                             )
+
+                        # webUrl is a "nice to have" for citation click-through
+                        # (unlike download_url above, which is required to
+                        # fetch the file at all) - a fetch failure here just
+                        # means this doc's citations aren't clickable, never
+                        # worth failing the whole sync over.
+                        if not item.web_url:
+                            try:
+                                item.web_url = sp.get_web_url(drive_id, item.doc_id)
+                            except Exception:
+                                log.warning("Could not fetch webUrl for '%s' - citations won't be clickable", item.name)
 
                         dest = Path(tmp) / item.name
                         sp.download(item.download_url, dest)

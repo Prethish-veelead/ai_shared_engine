@@ -126,6 +126,8 @@ class Indexer:
             metadata = {
                 "doc_id": doc_id, "bot_id": bot_id, "source": f"{list_name}: {title}",
                 "list_id": list_id, "site_url": site_url,
+                # The row's own SharePoint "view item" page - citation click-through.
+                "url": item.web_url,
             }
             metadata.update(extra_metadata_for(item.fields))
             texts.append(text)

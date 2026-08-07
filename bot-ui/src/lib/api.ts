@@ -6,6 +6,7 @@ export interface Citation {
   index: number;
   source: string;
   page: number | null;
+  url: string | null;
 }
 
 export interface AskResponse {

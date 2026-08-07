@@ -173,6 +173,11 @@ def sync_list_table(*, engine: Engine, db: Session, bot_id: str, list_id: str, l
         prep = conn.dialect.identifier_preparer
         qtable = prep.quote(table_name)
         conn.execute(text(f'CREATE TABLE IF NOT EXISTS {qtable} (row_key text PRIMARY KEY)'))
+        # The row's own SharePoint "view item" link - always present
+        # alongside row_key (not derived from the list's own business
+        # fields), so it's added unconditionally here rather than going
+        # through the field_names/column_map diffing below.
+        conn.execute(text(f'ALTER TABLE {qtable} ADD COLUMN IF NOT EXISTS source_url text'))
 
         # Rows get a full refresh every sync (TRUNCATE + reinsert below) - columns
         # get the same treatment, so a field that's disappeared from the source
@@ -187,7 +192,7 @@ def sync_list_table(*, engine: Engine, db: Session, bot_id: str, list_id: str, l
                 {"t": table_name},
             )
         }
-        for stale_col in existing_columns - current_columns - {"row_key"}:
+        for stale_col in existing_columns - current_columns - {"row_key", "source_url"}:
             conn.execute(text(f'ALTER TABLE {qtable} DROP COLUMN IF EXISTS {prep.quote(stale_col)}'))
 
         for field_name in field_names:
@@ -199,13 +204,14 @@ def sync_list_table(*, engine: Engine, db: Session, bot_id: str, list_id: str, l
         conn.execute(text(f'TRUNCATE {qtable}'))
 
         if published:
-            col_names = ["row_key"] + [column_map[f] for f in field_names]
+            col_names = ["row_key", "source_url"] + [column_map[f] for f in field_names]
             placeholders = ", ".join(f":{c}" for c in col_names)
             quoted_cols = ", ".join(prep.quote(c) for c in col_names)
             insert_sql = text(f'INSERT INTO {qtable} ({quoted_cols}) VALUES ({placeholders})')
 
             rows = [
-                {"row_key": item.item_id, **{column_map[f]: item.fields.get(f) for f in field_names}}
+                {"row_key": item.item_id, "source_url": item.web_url,
+                 **{column_map[f]: item.fields.get(f) for f in field_names}}
                 for item in published
             ]
             for i in range(0, len(rows), _INSERT_BATCH_SIZE):

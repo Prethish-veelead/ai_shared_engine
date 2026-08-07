@@ -14,7 +14,8 @@ def build_context(hits: list[SearchHit]) -> tuple[str, list[dict]]:
         label = f"{source}" + (f" (p.{page})" if page else "")
         blocks.append(f"[{i}] {label}\n{text}")
         citations.append({"index": i, "source": source, "page": page,
-                          "doc_id": hit.payload.get("doc_id"), "score": hit.score})
+                          "doc_id": hit.payload.get("doc_id"), "score": hit.score,
+                          "url": hit.payload.get("url")})
     return "\n\n".join(blocks), citations
 
 

@@ -67,7 +67,12 @@ def build_catalog(bot_id: str, db: Session) -> BotCatalog:
     for row in registry_rows:
         col_rows = db.execute(
             text("SELECT column_name, data_type FROM information_schema.columns "
-                 "WHERE table_schema = 'public' AND table_name = :t ORDER BY ordinal_position"),
+                 "WHERE table_schema = 'public' AND table_name = :t "
+                 # source_url is citation plumbing (app/db/list_tables.py), not
+                 # business data - hidden from the model so it never shows up
+                 # as a filterable/joinable column or false "shared column"
+                 # between unrelated lists that happen to both have one.
+                 "AND column_name != 'source_url' ORDER BY ordinal_position"),
             {"t": row.table_name},
         ).all()
         columns = [ColumnInfo(name=c.column_name, sql_type=c.data_type) for c in col_rows]

@@ -25,12 +25,19 @@ class ChangedItem:
     download_url: str | None
     last_modified: str | None
     fields: dict | None = None   # SharePoint column values (Status, Category, ...)
+    # The file's own "open in browser" link (driveItem.webUrl) - distinct
+    # from download_url (a temporary direct-bytes link for OUR ingestion
+    # only). This is what citation "View Source Document" links open.
+    web_url: str | None = None
 
 
 @dataclass
 class ListItem:
     item_id: str            # listItem id (stable within its list)
     fields: dict             # column values - IS the content, unlike a file
+    # The row's own "view this item" SharePoint page (listItem.webUrl) - not
+    # a file, but the same idea as ChangedItem.web_url for a document.
+    web_url: str | None = None
 
 
 class SharePointClient:
@@ -123,7 +130,7 @@ class SharePointClient:
             resp.raise_for_status()
             data = resp.json()
             for it in data.get("value", []):
-                items.append(ListItem(item_id=it["id"], fields=it.get("fields", {})))
+                items.append(ListItem(item_id=it["id"], fields=it.get("fields", {}), web_url=it.get("webUrl")))
             if "@odata.nextLink" in data:
                 next_link = data["@odata.nextLink"]
                 continue
@@ -153,6 +160,7 @@ class SharePointClient:
                     deleted="deleted" in it,
                     download_url=it.get("@microsoft.graph.downloadUrl"),
                     last_modified=it.get("lastModifiedDateTime"),
+                    web_url=it.get("webUrl"),
                 ))
             if "@odata.nextLink" in data:
                 next_link = data["@odata.nextLink"]
@@ -171,6 +179,19 @@ class SharePointClient:
         resp = requests.get(url, headers=headers, timeout=60)
         resp.raise_for_status()
         return resp.json().get("@microsoft.graph.downloadUrl")
+
+    def get_web_url(self, drive_id: str, item_id: str) -> str | None:
+        """webUrl isn't reliably present on /delta responses either (same
+        caveat as get_download_url above) - fetched separately here, rather
+        than folded into that call, so its existing return shape (used
+        elsewhere) doesn't change."""
+        import requests
+
+        headers = {"Authorization": f"Bearer {self._token()}"}
+        url = f"{GRAPH}/drives/{drive_id}/items/{item_id}"
+        resp = requests.get(url, headers=headers, timeout=60)
+        resp.raise_for_status()
+        return resp.json().get("webUrl")
 
     def get_fields(self, drive_id: str, item_id: str) -> dict:
         """Return the SharePoint column values (Status, Category, ...) for a
