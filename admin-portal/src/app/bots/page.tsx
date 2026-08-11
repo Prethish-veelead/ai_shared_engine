@@ -1,10 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api, Bot, AvailableModels, IndexStatus, WebSourceEntry, deriveBotId } from "@/lib/api";
+import {
+  api, Bot, AvailableModels, IndexStatus, WebSourceEntry, deriveBotId,
+  getSharePointTenant, setSharePointTenant, TENANT_DEV, TENANT_PRODUCTION,
+} from "@/lib/api";
 import { useAuthReady } from "@/lib/useAuthReady";
 import { LottieLoader } from "@/components/ui/LottieLoader";
-import { Bot as BotIcon, Plus, Settings2, Trash2, Edit2, Play, Square, ExternalLink, RefreshCw, RotateCcw, ThumbsUp, ThumbsDown, Sparkles, Loader2, Braces } from "lucide-react";
+import { Bot as BotIcon, Plus, Settings2, Trash2, Edit2, Play, Square, ExternalLink, RefreshCw, RotateCcw, ThumbsUp, ThumbsDown, Sparkles, Loader2, Braces, FlaskConical } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // A bot can pull from more than one SharePoint site, each with its own set
@@ -129,6 +132,17 @@ export default function BotsPage() {
   const [showJsonPreview, setShowJsonPreview] = useState(false);
   const [contentType, setContentType] = useState<"library" | "list" | "web">("library");
   const [webSource, setWebSource] = useState<WebSourceFormState>(newWebSourceState());
+  // TEMPORARY - dev/production tenant toggle, for testing only. Remove this
+  // state + the switch that renders it (below, near "Create Bot") once
+  // testing against the dev tenant is no longer needed - see api.ts's
+  // matching TEMPORARY block for the rest of this. Read from
+  // getSharePointTenant() on mount so a page refresh keeps whatever was
+  // last selected (persisted to localStorage there).
+  const [sharePointTenant, setSharePointTenantState] = useState(getSharePointTenant());
+  function handleTenantToggle(tenant: string) {
+    setSharePointTenant(tenant);
+    setSharePointTenantState(tenant);
+  }
   const authReady = useAuthReady();
 
   // Name/Route stay uncontrolled (defaultValue, like every other plain field
@@ -676,13 +690,51 @@ export default function BotsPage() {
           <h1 className="text-2xl font-bold tracking-tight text-navy dark:text-white">Bot Management</h1>
           <p className="text-sm text-gray-500 dark:text-gray-400">Configure and monitor your RAG bots.</p>
         </div>
-        <button
-          onClick={openCreate}
-          className="flex items-center gap-2 rounded-md bg-orange px-4 py-2 text-sm font-medium text-white hover:bg-orange-hover"
-        >
-          <Plus className="h-4 w-4" />
-          Create Bot
-        </button>
+        <div className="flex items-center gap-3">
+          {/* TEMPORARY - dev/production SharePoint tenant toggle, for testing
+              only. Remove this whole block (and its state/handler above,
+              and api.ts's matching TEMPORARY block) once testing against the
+              dev tenant is no longer needed. Affects "Load Libraries"/"Load
+              Lists" and every bot created/edited while a given option is
+              selected - it does not retroactively change already-saved bots. */}
+          <div
+            title="TEMPORARY testing toggle - which SharePoint tenant new/edited bots and Load Libraries/Lists use"
+            className="flex items-center gap-1.5 rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-500/10 px-2 py-1.5"
+          >
+            <FlaskConical className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+            <button
+              type="button"
+              onClick={() => handleTenantToggle(TENANT_DEV)}
+              className={cn(
+                "rounded px-2 py-0.5 text-xs font-medium transition-colors",
+                sharePointTenant === TENANT_DEV
+                  ? "bg-amber-500 text-white"
+                  : "text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-500/20"
+              )}
+            >
+              Dev
+            </button>
+            <button
+              type="button"
+              onClick={() => handleTenantToggle(TENANT_PRODUCTION)}
+              className={cn(
+                "rounded px-2 py-0.5 text-xs font-medium transition-colors",
+                sharePointTenant === TENANT_PRODUCTION
+                  ? "bg-amber-500 text-white"
+                  : "text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-500/20"
+              )}
+            >
+              Production
+            </button>
+          </div>
+          <button
+            onClick={openCreate}
+            className="flex items-center gap-2 rounded-md bg-orange px-4 py-2 text-sm font-medium text-white hover:bg-orange-hover"
+          >
+            <Plus className="h-4 w-4" />
+            Create Bot
+          </button>
+        </div>
       </div>
 
       {(isCreating || isEditing) ? (

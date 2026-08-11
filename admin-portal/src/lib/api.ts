@@ -1,11 +1,39 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api";
 const USE_MOCKS = process.env.NEXT_PUBLIC_USE_MOCKS === "true";
 
-// The bot create/edit form does not collect a SharePoint tenant slug (it only
-// exists as a backend-required field: app/bots/schema.py SharePointConfig.tenant).
-// Until the form grows that field, new/edited bots are written against this
-// tenant. Override via NEXT_PUBLIC_SHAREPOINT_TENANT if needed.
-const DEFAULT_SHAREPOINT_TENANT = process.env.NEXT_PUBLIC_SHAREPOINT_TENANT || "veelead-development";
+// ---------------------------------------------------------------------
+// TEMPORARY - dev/production tenant toggle, for testing only. Remove this
+// whole block (and the Dev/Production switch in bots/page.tsx that calls
+// setSharePointTenant) once testing against the dev tenant is no longer
+// needed - see the conversation this was added in.
+//
+// The bot create/edit form does not collect a SharePoint tenant slug per
+// bot (it only exists as a backend-required field: app/bots/schema.py's
+// SharePointConfig.tenant / WebSourceConfig.tenant) - every bot created or
+// edited through the form, and every "Load Libraries"/"Load Lists" call,
+// uses whichever of these two is currently selected.
+export const TENANT_DEV = "veelead-development";
+export const TENANT_PRODUCTION = "veelead-solutions";
+const TENANT_STORAGE_KEY = "admin-portal-sharepoint-tenant";
+
+// Module-level, not React state - api.ts has no component of its own, and
+// every caller (getSharePointLibraries/getSharePointLists/toBotConfigPayload)
+// is a plain function, not a hook. bots/page.tsx's toggle just calls
+// setSharePointTenant() and forces its own re-render.
+let currentTenant: string =
+  (typeof window !== "undefined" && localStorage.getItem(TENANT_STORAGE_KEY)) ||
+  process.env.NEXT_PUBLIC_SHAREPOINT_TENANT ||
+  TENANT_DEV;
+
+export function getSharePointTenant(): string {
+  return currentTenant;
+}
+
+export function setSharePointTenant(tenant: string): void {
+  currentTenant = tenant;
+  if (typeof window !== "undefined") localStorage.setItem(TENANT_STORAGE_KEY, tenant);
+}
+// ---------------------------------------------------------------------
 
 // --- Types ---
 
@@ -336,9 +364,9 @@ export function deriveBotId(data: Partial<Bot>): string {
 // indexing chunk sizes, and every WebSourceConfig fetch-etiquette setting -
 // user_agent/timeouts/rate-limit/robots/feeds) fall back to the same
 // defaults BotConfig itself uses, except `tenant`, which has no safe
-// default - see DEFAULT_SHAREPOINT_TENANT. An admin who needs to tune those
-// specific fetch settings per bot still can by hand-editing the YAML - see
-// docs/WEB_SOURCE_BOT.md.
+// default - see getSharePointTenant() (TEMPORARY dev/production toggle
+// above). An admin who needs to tune those specific fetch settings per bot
+// still can by hand-editing the YAML - see docs/WEB_SOURCE_BOT.md.
 function toBotConfigPayload(botId: string, data: Partial<Bot>) {
   const isWeb = data.contentType === "web";
   return {
@@ -354,7 +382,7 @@ function toBotConfigPayload(botId: string, data: Partial<Bot>) {
     ...(isWeb
       ? {
           web: {
-            tenant: DEFAULT_SHAREPOINT_TENANT,
+            tenant: getSharePointTenant(),
             site_url: data.webSource?.siteUrl || "",
             source_list: data.webSource?.sourceList || "",
             id_column: data.webSource?.idColumn || "ID",
@@ -366,7 +394,7 @@ function toBotConfigPayload(botId: string, data: Partial<Bot>) {
         }
       : {
           sharepoint: {
-            tenant: DEFAULT_SHAREPOINT_TENANT,
+            tenant: getSharePointTenant(),
             sites: (data.sharepointSites || []).map((s) => ({ site_url: s.siteUrl, libraries: s.libraries, lists: s.lists })),
           },
         }),
@@ -442,14 +470,14 @@ export const api = {
     // sharepoint_libraries) - lets the form offer a real dropdown instead of
     // a free-text field that can silently typo-mismatch the real library name
     // (exactly what broke the hr bot's sync earlier this session).
-    return fetcher<string[]>(`/admin/sharepoint/libraries${buildQuery({ site_url: siteUrl, tenant: DEFAULT_SHAREPOINT_TENANT })}`);
+    return fetcher<string[]>(`/admin/sharepoint/libraries${buildQuery({ site_url: siteUrl, tenant: getSharePointTenant() })}`);
   },
 
   async getSharePointLists(siteUrl: string): Promise<string[]> {
     if (USE_MOCKS) return ["IT FAQ", "Ticket Categories"];
     // Same idea as getSharePointLibraries, but for genuine SharePoint Lists
     // (app/api/routes/admin.py sharepoint_lists) - powers a List bot's picker.
-    return fetcher<string[]>(`/admin/sharepoint/lists${buildQuery({ site_url: siteUrl, tenant: DEFAULT_SHAREPOINT_TENANT })}`);
+    return fetcher<string[]>(`/admin/sharepoint/lists${buildQuery({ site_url: siteUrl, tenant: getSharePointTenant() })}`);
   },
 
   async getChatHistory(params?: { bot_id?: string; user_id?: string; keyword?: string; limit?: number }): Promise<ChatHistoryRow[]> {
