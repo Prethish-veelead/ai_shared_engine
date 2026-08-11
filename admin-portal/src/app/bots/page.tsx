@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api, Bot, AvailableModels, IndexStatus, deriveBotId } from "@/lib/api";
+import { api, Bot, AvailableModels, IndexStatus, WebSourceEntry, deriveBotId } from "@/lib/api";
 import { useAuthReady } from "@/lib/useAuthReady";
 import { LottieLoader } from "@/components/ui/LottieLoader";
 import { Bot as BotIcon, Plus, Settings2, Trash2, Edit2, Play, Square, ExternalLink, RefreshCw, RotateCcw, ThumbsUp, ThumbsDown, Sparkles, Loader2, Braces } from "lucide-react";
@@ -66,6 +66,40 @@ function newResponseFieldBlock(): ResponseFieldBlock {
   return { key: crypto.randomUUID(), name: "", prompt: "" };
 }
 
+// content_type=web bots scrape an admin-maintained SharePoint List of URLs
+// (docs/WEB_SOURCE_BOT.md) - a single site + single source list, unlike
+// library/list bots' repeatable multi-site SiteBlock, so this is its own
+// flat form state rather than another array of blocks.
+interface WebSourceFormState {
+  siteUrlInput: string;
+  loadedSiteUrl: string | null;
+  listOptions: string[];
+  selectedList: string;
+  loadingLists: boolean;
+  listError: string;
+  idColumn: string;
+  urlColumn: string;
+  enableColumn: string;
+  enabledValue: string;
+  categoryColumn: string;
+}
+
+function newWebSourceState(): WebSourceFormState {
+  return {
+    siteUrlInput: "",
+    loadedSiteUrl: null,
+    listOptions: [],
+    selectedList: "",
+    loadingLists: false,
+    listError: "",
+    idColumn: "ID",
+    urlColumn: "URL",
+    enableColumn: "Enable",
+    enabledValue: "yes",
+    categoryColumn: "Category",
+  };
+}
+
 // Clickable starter prompts shown in bot-ui's empty chat state. Same
 // repeatable-block pattern as ResponseFieldBlock above - a block with an
 // empty text is just dropped on save, not blocking submission.
@@ -93,7 +127,8 @@ export default function BotsPage() {
   const [includeCategory, setIncludeCategory] = useState(false);
   const [sampleQuestionBlocks, setSampleQuestionBlocks] = useState<SampleQuestionBlock[]>([]);
   const [showJsonPreview, setShowJsonPreview] = useState(false);
-  const [contentType, setContentType] = useState<"library" | "list">("library");
+  const [contentType, setContentType] = useState<"library" | "list" | "web">("library");
+  const [webSource, setWebSource] = useState<WebSourceFormState>(newWebSourceState());
   const authReady = useAuthReady();
 
   // Name/Route stay uncontrolled (defaultValue, like every other plain field
@@ -151,6 +186,23 @@ export default function BotsPage() {
         }))
       : [newSiteBlock()];
     setSiteBlocks(blocks);
+    // Seeded the same way as libraries/lists above - pre-filled from the
+    // bot's already-configured source so it shows correctly without a live
+    // SharePoint call just to open Edit; "Load Lists" below still works to
+    // pick a different source list.
+    const web = bot.webSource;
+    setWebSource(web ? {
+      ...newWebSourceState(),
+      siteUrlInput: web.siteUrl,
+      loadedSiteUrl: web.siteUrl,
+      listOptions: web.sourceList ? [web.sourceList] : [],
+      selectedList: web.sourceList,
+      idColumn: web.idColumn || "ID",
+      urlColumn: web.urlColumn || "URL",
+      enableColumn: web.enableColumn || "Enable",
+      enabledValue: web.enabledValue || "yes",
+      categoryColumn: web.categoryColumn || "Category",
+    } : newWebSourceState());
     setFormError("");
     setResponseFieldBlocks(
       (bot.responseFields || []).map((f) => ({ key: crypto.randomUUID(), name: f.name, prompt: f.prompt }))
@@ -172,6 +224,7 @@ export default function BotsPage() {
     setAllowedGroupsInput("");
     setContentType("library");
     setSiteBlocks([newSiteBlock()]);
+    setWebSource(newWebSourceState());
     setFormError("");
     setResponseFieldBlocks([]);
     setIncludeCategory(false);
@@ -345,6 +398,33 @@ export default function BotsPage() {
     }));
   }
 
+  // Same idea as handleLoadListsForBlock, but for the single URL-registry
+  // list a web bot reads from (WebSourceFormState.selectedList is one
+  // string, not an array - a web bot has exactly one source_list).
+  async function handleLoadListsForWebSource() {
+    const trimmed = webSource.siteUrlInput.trim();
+    if (!trimmed) {
+      setWebSource((prev) => ({ ...prev, listError: "Enter a SharePoint site URL first." }));
+      return;
+    }
+    setWebSource((prev) => ({ ...prev, loadingLists: true, listError: "" }));
+    try {
+      const lists = await api.getSharePointLists(trimmed);
+      setWebSource((prev) => {
+        const isNewSite = trimmed !== prev.loadedSiteUrl;
+        return {
+          ...prev,
+          listOptions: Array.from(new Set([...(isNewSite ? [] : prev.listOptions), ...lists])),
+          selectedList: isNewSite ? "" : prev.selectedList,
+          loadedSiteUrl: trimmed,
+          loadingLists: false,
+        };
+      });
+    } catch (error: any) {
+      setWebSource((prev) => ({ ...prev, listError: error?.message || "Failed to load lists for that site.", loadingLists: false }));
+    }
+  }
+
   useEffect(() => {
     if (!authReady) return;
     loadBots();
@@ -396,17 +476,25 @@ export default function BotsPage() {
   async function handleSave(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
 
-    // Without this, a bot can be saved with zero libraries/lists selected (or
-    // a dangling site with none checked) - it creates and syncs successfully
-    // (nothing to sync from isn't an error), then silently answers "I don't
-    // know" to everything forever with no indication anything's wrong.
-    const sourceLabel = contentType === "list" ? "list" : "library";
-    const hasEmptyBlock = contentType === "list"
-      ? siteBlocks.some((b) => b.selectedLists.length === 0)
-      : siteBlocks.some((b) => b.selectedLibraries.length === 0);
-    if (siteBlocks.length === 0 || hasEmptyBlock) {
-      setFormError(`Add at least one SharePoint site with at least one ${sourceLabel} selected before creating this bot.`);
-      return;
+    // Without this, a bot can be saved with zero libraries/lists/source-list
+    // selected (or a dangling site with none checked) - it creates and syncs
+    // successfully (nothing to sync from isn't an error), then silently
+    // answers "I don't know" to everything forever with no indication
+    // anything's wrong.
+    if (contentType === "web") {
+      if (!webSource.siteUrlInput.trim() || !webSource.selectedList) {
+        setFormError("Enter a SharePoint site URL and choose a source list before creating this bot.");
+        return;
+      }
+    } else {
+      const sourceLabel = contentType === "list" ? "list" : "library";
+      const hasEmptyBlock = contentType === "list"
+        ? siteBlocks.some((b) => b.selectedLists.length === 0)
+        : siteBlocks.some((b) => b.selectedLibraries.length === 0);
+      if (siteBlocks.length === 0 || hasEmptyBlock) {
+        setFormError(`Add at least one SharePoint site with at least one ${sourceLabel} selected before creating this bot.`);
+        return;
+      }
     }
 
     const formData = new FormData(e.currentTarget);
@@ -447,11 +535,20 @@ export default function BotsPage() {
       name: formData.get("name") as string,
       route: formData.get("route") as string,
       contentType,
-      sharepointSites: siteBlocks.map((b) => ({
+      sharepointSites: contentType === "web" ? [] : siteBlocks.map((b) => ({
         siteUrl: b.loadedSiteUrl || b.siteUrlInput.trim(),
         libraries: contentType === "library" ? b.selectedLibraries : [],
         lists: contentType === "list" ? b.selectedLists : [],
       })),
+      webSource: contentType === "web" ? {
+        siteUrl: webSource.loadedSiteUrl || webSource.siteUrlInput.trim(),
+        sourceList: webSource.selectedList,
+        idColumn: webSource.idColumn.trim() || "ID",
+        urlColumn: webSource.urlColumn.trim() || "URL",
+        enableColumn: webSource.enableColumn.trim() || "Enable",
+        enabledValue: webSource.enabledValue.trim() || "yes",
+        categoryColumn: webSource.categoryColumn.trim(),
+      } : undefined,
       qdrantCollection: formData.get("qdrantCollection") as string,
       llmModel: formData.get("llmModel") as string,
       embeddingModel: formData.get("embeddingModel") as string,
@@ -488,6 +585,7 @@ export default function BotsPage() {
     setAllowedGroupsInput("");
     setContentType("library");
     setSiteBlocks([]);
+    setWebSource(newWebSourceState());
     setFormError("");
     setResponseFieldBlocks([]);
     setPromptBeforeImprove(null);
@@ -611,7 +709,7 @@ export default function BotsPage() {
               <div className="sm:col-span-2">
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Content Type</label>
                 <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
-                  A bot pulls from either document libraries (files) or SharePoint Lists (rows), not both - and can&apos;t be changed after creation.
+                  A bot pulls from document libraries (files), SharePoint Lists (rows), or a scraped list of web URLs - never more than one, and can&apos;t be changed after creation.
                 </p>
                 <div className="flex gap-4">
                   <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
@@ -636,8 +734,114 @@ export default function BotsPage() {
                     />
                     List (rows)
                   </label>
+                  <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                    <input
+                      type="radio"
+                      name="contentTypeRadio"
+                      checked={contentType === "web"}
+                      disabled={!!isEditing}
+                      onChange={() => setContentType("web")}
+                      className="border-gray-300 dark:border-navy-deep"
+                    />
+                    Web (URLs)
+                  </label>
                 </div>
               </div>
+              {contentType === "web" ? (
+                <div className="sm:col-span-2 space-y-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Web Source</label>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                      A SharePoint List holding the URLs to scrape (columns like ID, URL, Enable, Category) - not itself answerable content, just a registry of what to fetch. See docs/WEB_SOURCE_BOT.md.
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-gray-300 dark:border-navy-deep p-3 space-y-2">
+                    <div className="flex gap-2">
+                      <input
+                        value={webSource.siteUrlInput}
+                        onChange={(e) => setWebSource((prev) => ({ ...prev, siteUrlInput: e.target.value }))}
+                        className="block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none"
+                        placeholder="https://contoso.sharepoint.com/sites/news"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleLoadListsForWebSource}
+                        disabled={webSource.loadingLists || !webSource.siteUrlInput.trim()}
+                        className="shrink-0 rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-navy-deep/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {webSource.loadingLists ? "Loading..." : "Load Lists"}
+                      </button>
+                    </div>
+                    {webSource.listError && <p className="text-xs text-red-600 dark:text-red-400">{webSource.listError}</p>}
+                    {webSource.listOptions.length === 0 ? (
+                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                        Click &quot;Load Lists&quot; above to choose from this site&apos;s real SharePoint Lists.
+                      </p>
+                    ) : (
+                      <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-gray-300 dark:border-navy-deep p-2">
+                        {webSource.listOptions.map((lst) => (
+                          <label key={lst} className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                            <input
+                              type="radio"
+                              name="webSourceList"
+                              checked={webSource.selectedList === lst}
+                              onChange={() => setWebSource((prev) => ({ ...prev, selectedList: lst }))}
+                              className="border-gray-300 dark:border-navy-deep"
+                            />
+                            {lst}
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">ID column</label>
+                      <input
+                        value={webSource.idColumn}
+                        onChange={(e) => setWebSource((prev) => ({ ...prev, idColumn: e.target.value }))}
+                        className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">URL column</label>
+                      <input
+                        value={webSource.urlColumn}
+                        onChange={(e) => setWebSource((prev) => ({ ...prev, urlColumn: e.target.value }))}
+                        className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">Enable column</label>
+                      <input
+                        value={webSource.enableColumn}
+                        onChange={(e) => setWebSource((prev) => ({ ...prev, enableColumn: e.target.value }))}
+                        className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">Enabled value</label>
+                      <input
+                        value={webSource.enabledValue}
+                        onChange={(e) => setWebSource((prev) => ({ ...prev, enabledValue: e.target.value }))}
+                        className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
+                      />
+                    </div>
+                    <div className="col-span-2">
+                      <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">Category column (optional)</label>
+                      <input
+                        value={webSource.categoryColumn}
+                        onChange={(e) => setWebSource((prev) => ({ ...prev, categoryColumn: e.target.value }))}
+                        className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    Fetch etiquette (robots.txt, rate limits, User-Agent, feed preference) uses sensible defaults not shown here - edit the bot&apos;s YAML directly to tune those. See docs/WEB_SOURCE_BOT.md.
+                  </p>
+                  {formError && <p className="text-xs text-red-600 dark:text-red-400">{formError}</p>}
+                </div>
+              ) : (
               <div className="sm:col-span-2 space-y-3">
                 <div className="flex items-center justify-between">
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">SharePoint Sources</label>
@@ -741,6 +945,7 @@ export default function BotsPage() {
                 ))}
                 {formError && <p className="text-xs text-red-600 dark:text-red-400">{formError}</p>}
               </div>
+              )}
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Qdrant Collection Name</label>
                 <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
@@ -982,7 +1187,18 @@ export default function BotsPage() {
                   </td>
                   <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{bot.route}</td>
                   <td className="px-4 py-4 text-sm text-gray-500 dark:text-gray-400 max-w-[200px] break-words">
-                    {bot.sharepointSites && bot.sharepointSites.length > 0 ? (
+                    {bot.webSource ? (
+                      <a
+                        href={bot.webSource.siteUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline"
+                        title={bot.webSource.siteUrl}
+                      >
+                        {bot.webSource.sourceList || "Web source"}
+                        <ExternalLink className="h-3 w-3 shrink-0" />
+                      </a>
+                    ) : bot.sharepointSites && bot.sharepointSites.length > 0 ? (
                       <div className="space-y-1">
                         {bot.sharepointSites.map((site, i) => (
                           <a

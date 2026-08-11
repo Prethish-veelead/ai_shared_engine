@@ -20,19 +20,38 @@ export interface ResponseFieldEntry {
   prompt: string;
 }
 
+// content_type: web bots (ai-search-engine/app/bots/schema.py WebSourceConfig)
+// scrape an admin-maintained SharePoint List of URLs into the bot's own
+// Qdrant collection - see docs/WEB_SOURCE_BOT.md. Unlike library/list bots'
+// sharepointSites (repeatable, multi-select), a web bot has exactly ONE
+// site + ONE source list, so this is its own flat shape, not another
+// SharePointSiteEntry-style array.
+export interface WebSourceEntry {
+  siteUrl: string;
+  sourceList: string;
+  idColumn: string;
+  urlColumn: string;
+  enableColumn: string;
+  enabledValue: string;
+  categoryColumn: string;
+}
+
 export interface Bot {
   id: string;
   name: string;
   route: string;
   enabled: boolean;
-  // A bot is either a "Library bot" (files) or a "List bot" (SharePoint List
-  // rows) - not both at once (hybrid is a possible future addition, not
-  // supported yet). Immutable after creation - see config_writer.py.
-  contentType?: "library" | "list";
+  // A bot is a "Library bot" (files), a "List bot" (SharePoint List rows),
+  // or a "Web bot" (scraped URLs) - never more than one at once (hybrid is
+  // a possible future addition, not supported yet). Immutable after
+  // creation - see config_writer.py.
+  contentType?: "library" | "list" | "web";
   // Additional fields for the form that might not exist in the basic list yet.
   // A bot can pull from more than one SharePoint site, each with its own
-  // libraries/lists - names are only unique WITHIN a site.
+  // libraries/lists - names are only unique WITHIN a site. Library/list
+  // bots only - web bots use webSource below instead.
   sharepointSites?: SharePointSiteEntry[];
+  webSource?: WebSourceEntry;
   qdrantCollection?: string;
   llmModel?: string;
   embeddingModel?: string;
@@ -313,20 +332,44 @@ export function deriveBotId(data: Partial<Bot>): string {
 
 // Maps the flat form fields the Bot Management page collects into the nested
 // BotConfig shape the backend requires (app/bots/schema.py). Fields the form
-// does not collect (sharepoint.tenant, prompt.temperature, indexing chunk
-// sizes) fall back to the same defaults BotConfig itself uses, except
-// `tenant`, which has no safe default - see DEFAULT_SHAREPOINT_TENANT.
+// does not collect (sharepoint.tenant/web.tenant, prompt.temperature,
+// indexing chunk sizes, and every WebSourceConfig fetch-etiquette setting -
+// user_agent/timeouts/rate-limit/robots/feeds) fall back to the same
+// defaults BotConfig itself uses, except `tenant`, which has no safe
+// default - see DEFAULT_SHAREPOINT_TENANT. An admin who needs to tune those
+// specific fetch settings per bot still can by hand-editing the YAML - see
+// docs/WEB_SOURCE_BOT.md.
 function toBotConfigPayload(botId: string, data: Partial<Bot>) {
+  const isWeb = data.contentType === "web";
   return {
     id: botId,
     name: data.name,
     route: data.route,
     enabled: data.enabled ?? true,
     content_type: data.contentType || "library",
-    sharepoint: {
-      tenant: DEFAULT_SHAREPOINT_TENANT,
-      sites: (data.sharepointSites || []).map((s) => ({ site_url: s.siteUrl, libraries: s.libraries, lists: s.lists })),
-    },
+    // Mutually exclusive - a web bot sets `web`, never `sharepoint`
+    // (app/bots/schema.py's _valid_content_source enforces this server-side
+    // too; omitting the unused key here rather than sending an empty one
+    // avoids relying on that validator alone to catch a form bug).
+    ...(isWeb
+      ? {
+          web: {
+            tenant: DEFAULT_SHAREPOINT_TENANT,
+            site_url: data.webSource?.siteUrl || "",
+            source_list: data.webSource?.sourceList || "",
+            id_column: data.webSource?.idColumn || "ID",
+            url_column: data.webSource?.urlColumn || "URL",
+            enable_column: data.webSource?.enableColumn || "Enable",
+            enabled_value: data.webSource?.enabledValue || "yes",
+            category_column: data.webSource?.categoryColumn || "Category",
+          },
+        }
+      : {
+          sharepoint: {
+            tenant: DEFAULT_SHAREPOINT_TENANT,
+            sites: (data.sharepointSites || []).map((s) => ({ site_url: s.siteUrl, libraries: s.libraries, lists: s.lists })),
+          },
+        }),
     vectorstore: {
       collection: data.qdrantCollection || botId,
     },
