@@ -60,6 +60,32 @@ class AccessConfig(BaseModel):
     allowed_groups: list[str] = Field(default_factory=list)  # Entra group IDs
 
 
+class WebSourceConfig(BaseModel):
+    """content_type=web bots only: where to read the admin-maintained
+    registry of URLs to scrape (a SharePoint List - NOT ingested as content
+    itself, unlike a content_type=list bot's Lists; see app/ingestion/
+    web_fetcher.py.read_web_sources) plus the fetch etiquette/behavior
+    settings. Kept as its own block rather than reusing SharePointConfig's
+    `sites: [...]` shape - a web bot has exactly one site + one URL-list,
+    not a multi-site multi-library structure, and needs column-name
+    mapping (id/url/enable/category) that library/list bots have no
+    equivalent for."""
+    tenant: str
+    site_url: str
+    source_list: str                       # the SharePoint LIST holding the URLs
+    id_column: str = "ID"
+    url_column: str = "URL"
+    enable_column: str = "Enable"
+    enabled_value: str = "yes"
+    category_column: str | None = "Category"
+    user_agent: str = "VeeleadBot/1.0 (+https://veelead.com)"
+    request_timeout_s: int = 15
+    per_host_delay_s: float = 1.0          # politeness between requests to the same host
+    respect_robots: bool = True
+    max_items_per_source: int = 25         # cap feed entries / links per source
+    prefer_feeds: bool = True
+
+
 class ResponseField(BaseModel):
     """One extra field a bot adds to its /ask response, on top of the fixed
     base fields (answer, citations, model, total_tokens, cost_usd,
@@ -97,20 +123,26 @@ class BotConfig(BaseModel):
     name: str
     route: str
     enabled: bool = True
-    # A bot is either a "Library bot" (files, chunked and embedded) or a
-    # "List bot" (SharePoint List rows, one row = one chunk) - not both at
-    # once. Hybrid (one bot mixing files and list rows) is a real future
-    # possibility but deliberately out of scope for now; the validator below
-    # enforces it so a misconfigured bot fails loudly at load instead of
-    # silently ignoring half its configured sources.
-    content_type: Literal["library", "list"] = "library"
+    # A bot is a "Library bot" (files, chunked and embedded), a "List bot"
+    # (SharePoint List rows, one row = one chunk), or a "Web bot" (scrapes
+    # an admin-maintained list of URLs into the same Qdrant vector path a
+    # library bot uses - see app/ingestion/web_fetcher.py) - never more than
+    # one at once. Hybrid sources are a real future possibility but
+    # deliberately out of scope for now; the validator below enforces it so
+    # a misconfigured bot fails loudly at load instead of silently ignoring
+    # half its configured sources.
+    content_type: Literal["library", "list", "web"] = "library"
     # List bots only: also sync each SharePoint List's rows into its own typed
     # Postgres table (app/db/list_tables.py), alongside the existing Qdrant
     # embedding - similarity search alone can't answer exact counts/filters/
-    # joins. Ignored for library bots. Defaults on so this is automatic,
+    # joins. Ignored for library/web bots. Defaults on so this is automatic,
     # per-bot opt-out only if a specific list bot doesn't need it.
     structured_store: bool = True
-    sharepoint: SharePointConfig
+    # Required for library/list bots, unset for web bots (which use `web`
+    # below instead) - see _valid_content_source.
+    sharepoint: SharePointConfig | None = None
+    # Web bots only - see WebSourceConfig.
+    web: WebSourceConfig | None = None
     vectorstore: VectorStoreConfig
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     prompt: PromptConfig
@@ -130,7 +162,25 @@ class BotConfig(BaseModel):
     sample_questions: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _no_hybrid_sources(self) -> "BotConfig":
+    def _valid_content_source(self) -> "BotConfig":
+        if self.content_type == "web":
+            if self.web is None:
+                raise ValueError(
+                    f"Bot '{self.id}': content_type is 'web' but no 'web' config "
+                    "block is set - see WebSourceConfig."
+                )
+            if self.sharepoint is not None:
+                raise ValueError(
+                    f"Bot '{self.id}': content_type is 'web' bots are configured "
+                    "entirely under 'web', not 'sharepoint' - remove 'sharepoint'."
+                )
+            return self
+
+        if self.sharepoint is None:
+            raise ValueError(
+                f"Bot '{self.id}': content_type '{self.content_type}' requires a "
+                "'sharepoint' config block."
+            )
         if self.content_type == "library":
             if any(site.lists for site in self.sharepoint.sites):
                 raise ValueError(

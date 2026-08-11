@@ -153,6 +153,28 @@ class ListTable(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class WebSource(Base):
+    """Registry of currently-indexed sources for a content_type=web bot -
+    mirrors ListTable's role for list bots (app/db/list_tables.py), but
+    there's no per-source Postgres table here, just this one row per
+    SharePoint URL-list row that was successfully indexed into the bot's
+    Qdrant collection. run_web_sync (app/workers/web_sync.py) diffs this
+    against each sync's freshly-read enabled-source set to reconcile: a
+    source disabled or deleted from the SharePoint list has its row here
+    (and its Qdrant chunks) dropped on the next sync."""
+
+    __tablename__ = "web_sources"
+    __table_args__ = (UniqueConstraint("bot_id", "source_id", name="uq_web_sources_bot_source"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    bot_id: Mapped[str] = mapped_column(String(64), index=True)
+    source_id: Mapped[str] = mapped_column(String(128))
+    url: Mapped[str] = mapped_column(Text)
+    category: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Bot(Base):
     """Optional DB copy of bot metadata (source of truth stays in YAML for now)."""
 
