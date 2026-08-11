@@ -19,6 +19,7 @@ from app.workers.sync_job import (
     run_list_sync,
     run_sync,
 )
+from app.workers.web_sync import build_web_sharepoint_client, run_web_sync
 
 configure_logging()
 log = get_logger(__name__)
@@ -47,13 +48,19 @@ def sync_one_bot(bot_id: str, full: bool = False) -> None:
 
     try:
         bot = registry.get_any(bot_id)   # allow disabled bots: their content can still be kept synced
-        sp = build_sharepoint_client(bot)            # per-tenant credentials
+        # web bots read their tenant from bot.web, not bot.sharepoint (which
+        # they never set - see app/bots/schema.py's _valid_content_source).
+        sp = build_web_sharepoint_client(bot) if bot.content_type == "web" else build_sharepoint_client(bot)
         with _session_factory()() as db:
             if bot.content_type == "list":
                 # List bots always do a full re-pull (see run_list_sync) - the
                 # "full" flag only matters for library bots' delta tokens.
                 list_id_for = resolve_list_ids(bot, sp)
                 run_list_sync(bot, db, list_id_for, sp=sp)
+            elif bot.content_type == "web":
+                # Web bots also always do a full re-pull per source (see
+                # run_web_sync's docstring) - same reason "full" doesn't apply.
+                run_web_sync(bot, db, sp=sp)
             else:
                 drive_id_for = resolve_drive_ids(bot, sp)    # site_url + libraries -> ids
                 if full:

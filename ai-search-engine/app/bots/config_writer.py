@@ -96,12 +96,13 @@ def delete_bot(bot_id: str, *, vector_store=None, db=None) -> BotConfig:
     if db is not None:
         from sqlalchemy import delete as sa_delete
         from app.db.list_tables import drop_all_list_tables
-        from app.db.models import ChatLog, EventLog, SyncState, UsageLog
+        from app.db.models import ChatLog, EventLog, SyncState, UsageLog, WebSource
         from app.db.session import get_engine
         db.execute(sa_delete(SyncState).where(SyncState.bot_id == bot_id))
         db.execute(sa_delete(ChatLog).where(ChatLog.bot_id == bot_id))
         db.execute(sa_delete(UsageLog).where(UsageLog.bot_id == bot_id))
         db.execute(sa_delete(EventLog).where(EventLog.bot_id == bot_id))
+        db.execute(sa_delete(WebSource).where(WebSource.bot_id == bot_id))
         db.commit()
         drop_all_list_tables(bot_id, db, get_engine())
 

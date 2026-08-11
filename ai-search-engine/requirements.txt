@@ -34,5 +34,10 @@ requests==2.32.3
 # --- Scheduling ---
 apscheduler==3.11.0
 
+# --- Web-source bots (content_type: web): feed/article scraping ---
+feedparser==6.0.11
+trafilatura==1.12.2
+beautifulsoup4==4.12.3
+
 # --- Monitoring (admin Resources page: system RAM/CPU/disk) ---
 psutil==6.1.0
