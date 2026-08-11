@@ -68,10 +68,13 @@ def _run_tool(db: Session, tool: str, period_days: int | None) -> dict:
         return {"models": rows}
 
     if tool == "list_bots":
+        # sharepoint is null for content_type=web bots (they use `web`
+        # instead - see app/bots/schema.py's _valid_content_source).
         return {"bots": [{
             "id": b.id, "name": b.name, "route": b.route, "enabled": b.enabled,
             "llm_model": b.models.llm, "embedding_model": b.models.embedding,
-            "sharepoint_sites": [s.site_url for s in b.sharepoint.sites],
+            "sharepoint_sites": [s.site_url for s in b.sharepoint.sites] if b.sharepoint else [],
+            "web_source_url": b.web.site_url if b.web else None,
         } for b in registry.all()]}
 
     raise ValueError(f"Unknown tool '{tool}'")

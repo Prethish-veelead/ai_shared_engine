@@ -32,6 +32,7 @@ from app.monitoring.activity import activity_by_bot
 from app.monitoring.resources import get_resources as get_system_resources
 from app.monitoring.storage import get_storage_by_bot
 from app.workers.sync_scheduler import sync_one_bot
+from app.workers.web_sync import WEB_SYNC_LIBRARY
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -48,7 +49,15 @@ def list_bots() -> list[dict]:
     return [{
         "id": b.id, "name": b.name, "route": b.route, "enabled": b.enabled,
         "contentType": b.content_type,
-        "sharepointSites": [{"siteUrl": s.site_url, "libraries": s.libraries, "lists": s.lists} for s in b.sharepoint.sites],
+        # sharepoint is null for content_type=web bots (they use `web`
+        # instead - see app/bots/schema.py's _valid_content_source).
+        "sharepointSites": [{"siteUrl": s.site_url, "libraries": s.libraries, "lists": s.lists} for s in b.sharepoint.sites] if b.sharepoint else [],
+        "webSource": ({
+            "siteUrl": b.web.site_url, "sourceList": b.web.source_list,
+            "idColumn": b.web.id_column, "urlColumn": b.web.url_column,
+            "enableColumn": b.web.enable_column, "enabledValue": b.web.enabled_value,
+            "categoryColumn": b.web.category_column or "",
+        } if b.web else None),
         "qdrantCollection": b.vectorstore.collection,
         "llmModel": b.models.llm,
         "embeddingModel": b.models.embedding,
@@ -86,11 +95,17 @@ def index_status(bot_id: str | None = None, db: Session = Depends(get_session)) 
         # let a stale row for the OLD name stand in for the new one, making
         # "all_libraries_synced" true even though the renamed library itself
         # was never actually synced.
-        current_keys = {
-            (site.site_url, name)
-            for site in bot.sharepoint.sites
-            for name in (*site.libraries, *site.lists)
-        }
+        # content_type=web bots have no per-library/list breakdown - the
+        # whole bot's sync is one SyncState row, keyed with a sentinel
+        # "library" name (app/workers/web_sync.py's WEB_SYNC_LIBRARY).
+        if bot.content_type == "web":
+            current_keys = {(bot.web.site_url, WEB_SYNC_LIBRARY)}
+        else:
+            current_keys = {
+                (site.site_url, name)
+                for site in (bot.sharepoint.sites if bot.sharepoint else [])
+                for name in (*site.libraries, *site.lists)
+            }
         states = [s for s in states_by_bot.get(bot.id, []) if (s.site_url, s.library) in current_keys]
         # MIN across libraries, not MAX, and only once every configured
         # library has a row with a real last_run_at - a bot with N libraries
@@ -106,8 +121,12 @@ def index_status(bot_id: str | None = None, db: Session = Depends(get_session)) 
         # value in general (a bot is only as fresh as its stalest library).
         # A bot only ever populates one of libraries/lists (see BotConfig.
         # content_type), so summing both here just counts "sync units"
-        # generically without needing to branch on content_type.
-        total_libraries = sum(len(site.libraries) + len(site.lists) for site in bot.sharepoint.sites)
+        # generically without needing to branch on content_type - except
+        # web, which has no libraries/lists at all and is always exactly
+        # one sync unit (see current_keys above).
+        total_libraries = 1 if bot.content_type == "web" else sum(
+            len(site.libraries) + len(site.lists) for site in (bot.sharepoint.sites if bot.sharepoint else [])
+        )
         all_libraries_synced = bool(states) and len(states) >= total_libraries \
             and all(s.last_run_at is not None for s in states)
         last_run = min((s.last_run_at for s in states), default=None) if all_libraries_synced else None

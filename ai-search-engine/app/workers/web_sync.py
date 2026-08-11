@@ -13,6 +13,7 @@ same reasoning that already separates app/db/list_tables.py out from the
 rest of the list-sync machinery.
 """
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -32,8 +33,19 @@ from app.ingestion.web_fetcher import (
 )
 from app.llm.base import embedding_dimension
 from app.vectorstore.base import VectorPoint
+from app.workers.sync_job import _get_state
 
 log = get_logger(__name__)
+
+# A web bot has no per-library/per-list breakdown to track SyncState per -
+# unlike run_sync/run_list_sync, the whole bot's sync is one unit. Reusing
+# SyncState (keyed bot_id/site_url/library) with this sentinel "library"
+# name, rather than inventing a separate tracking mechanism, is what lets
+# app/api/routes/admin.py's index_status() report a real last_sync_at for
+# web bots through the exact same code path every other bot already uses
+# (the admin portal's "Sync Now" spinner polls last_sync_at to know when a
+# sync finished - without this it would poll forever).
+WEB_SYNC_LIBRARY = "__web__"
 
 
 def build_web_sharepoint_client(bot: BotConfig) -> SharePointClient:
@@ -170,6 +182,11 @@ def run_web_sync(bot: BotConfig, db: Session, sp: SharePointClient | None = None
     # must never be treated the same as a real removal).
     enabled_ids = {s.source_id for s in enabled_sources}
     reconcile_web_sources(db, vector_store, collection, bot.id, enabled_ids)
+
+    state = _get_state(db, bot.id, web.site_url, WEB_SYNC_LIBRARY)
+    state.last_run_at = datetime.now(timezone.utc)
+    state.last_status = "failed" if failed else "success"
+    db.commit()
 
     if failed:
         raise UpstreamError(
