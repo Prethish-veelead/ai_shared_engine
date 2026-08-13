@@ -85,6 +85,19 @@ interface WebSourceFormState {
   enableColumn: string;
   enabledValue: string;
   categoryColumn: string;
+  showImages: "feeds_only" | "all" | "off";
+  // Real column names for the selected source list, loaded on demand (same
+  // pattern as the list+library Solved Gate) - idColumn/urlColumn/
+  // enableColumn/categoryColumn render as a dropdown of these once loaded,
+  // a plain text box before that (so the form still works pre-"Load Columns").
+  columnOptions: string[];
+  loadingColumns: boolean;
+  columnError: string;
+  // Real distinct values of whichever column is picked as enableColumn -
+  // lets enabledValue be picked from a dropdown too, mirroring solvedValue.
+  valueOptions: string[];
+  loadingValues: boolean;
+  valueError: string;
 }
 
 function newWebSourceState(): WebSourceFormState {
@@ -100,6 +113,13 @@ function newWebSourceState(): WebSourceFormState {
     enableColumn: "Enable",
     enabledValue: "yes",
     categoryColumn: "Category",
+    showImages: "feeds_only",
+    columnOptions: [],
+    loadingColumns: false,
+    columnError: "",
+    valueOptions: [],
+    loadingValues: false,
+    valueError: "",
   };
 }
 
@@ -113,6 +133,165 @@ interface SampleQuestionBlock {
 
 function newSampleQuestionBlock(): SampleQuestionBlock {
   return { key: crypto.randomUUID(), text: "" };
+}
+
+// content_type=list+library bots (ai-search-engine/docs/LIST_PLUS_LIBRARY_BOT.md)
+// need TWO independent SiteBlock arrays (library sites + list sites), unlike
+// every other content type's single `siteBlocks` array above - these generic,
+// setter-parametrized versions of the same update/add/remove/load/toggle
+// logic let both arrays reuse it instead of duplicating the whole pattern twice.
+function updateBlockIn(setter: React.Dispatch<React.SetStateAction<SiteBlock[]>>, key: string, patch: Partial<SiteBlock>) {
+  setter((prev) => prev.map((b) => (b.key === key ? { ...b, ...patch } : b)));
+}
+
+function addBlockIn(setter: React.Dispatch<React.SetStateAction<SiteBlock[]>>) {
+  setter((prev) => [...prev, newSiteBlock()]);
+}
+
+function removeBlockIn(setter: React.Dispatch<React.SetStateAction<SiteBlock[]>>, key: string) {
+  setter((prev) => prev.filter((b) => b.key !== key));
+}
+
+async function loadOptionsIn(
+  kind: "library" | "list", blocks: SiteBlock[],
+  setter: React.Dispatch<React.SetStateAction<SiteBlock[]>>, key: string,
+) {
+  const block = blocks.find((b) => b.key === key);
+  if (!block) return;
+  const trimmed = block.siteUrlInput.trim();
+  const errorField = kind === "library" ? "libraryError" : "listError";
+  const loadingField = kind === "library" ? "loadingLibraries" : "loadingLists";
+  if (!trimmed) {
+    updateBlockIn(setter, key, { [errorField]: "Enter a SharePoint site URL first." } as Partial<SiteBlock>);
+    return;
+  }
+  updateBlockIn(setter, key, { [loadingField]: true, [errorField]: "" } as Partial<SiteBlock>);
+  try {
+    const options = kind === "library" ? await api.getSharePointLibraries(trimmed) : await api.getSharePointLists(trimmed);
+    const isNewSite = trimmed !== block.loadedSiteUrl;
+    setter((prev) => prev.map((b) => {
+      if (b.key !== key) return b;
+      if (kind === "library") {
+        return {
+          ...b,
+          libraryOptions: Array.from(new Set([...(isNewSite ? [] : b.libraryOptions), ...options])),
+          selectedLibraries: isNewSite ? [] : b.selectedLibraries,
+          loadedSiteUrl: trimmed, loadingLibraries: false,
+        };
+      }
+      return {
+        ...b,
+        listOptions: Array.from(new Set([...(isNewSite ? [] : b.listOptions), ...options])),
+        selectedLists: isNewSite ? [] : b.selectedLists,
+        loadedSiteUrl: trimmed, loadingLists: false,
+      };
+    }));
+  } catch (error: any) {
+    updateBlockIn(setter, key, {
+      [errorField]: error?.message || `Failed to load ${kind === "library" ? "libraries" : "lists"} for that site.`,
+      [loadingField]: false,
+    } as Partial<SiteBlock>);
+  }
+}
+
+function toggleOptionIn(kind: "library" | "list", setter: React.Dispatch<React.SetStateAction<SiteBlock[]>>, key: string, value: string) {
+  setter((prev) => prev.map((b) => {
+    if (b.key !== key) return b;
+    if (kind === "library") {
+      const selectedLibraries = b.selectedLibraries.includes(value)
+        ? b.selectedLibraries.filter((l) => l !== value) : [...b.selectedLibraries, value];
+      return { ...b, selectedLibraries };
+    }
+    const selectedLists = b.selectedLists.includes(value)
+      ? b.selectedLists.filter((l) => l !== value) : [...b.selectedLists, value];
+    return { ...b, selectedLists };
+  }));
+}
+
+// Shared JSX for a repeatable SharePoint site picker (library OR list mode) -
+// used twice by the list+library form section below (once for library sites,
+// once for list sites), same visual shape as the single-array picker further
+// down in this file.
+function CombinedSiteBlockEditor({
+  blocks, kind, label, placeholder,
+  onAdd, onRemove, onUpdate, onLoad, onToggle,
+}: {
+  blocks: SiteBlock[];
+  kind: "library" | "list";
+  label: string;
+  placeholder: string;
+  onAdd: () => void;
+  onRemove: (key: string) => void;
+  onUpdate: (key: string, patch: Partial<SiteBlock>) => void;
+  onLoad: (key: string) => void;
+  onToggle: (key: string, value: string) => void;
+}) {
+  const loadLabel = kind === "library" ? "Load Libraries" : "Load Lists";
+  const emptyLabel = kind === "library" ? "document libraries" : "SharePoint Lists";
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">{label}</label>
+        <button type="button" onClick={onAdd} className="text-sm font-medium text-orange hover:text-orange-hover">
+          + Add another SharePoint site
+        </button>
+      </div>
+      {blocks.map((block, idx) => {
+        const options = kind === "library" ? block.libraryOptions : block.listOptions;
+        const selected = kind === "library" ? block.selectedLibraries : block.selectedLists;
+        const loading = kind === "library" ? block.loadingLibraries : block.loadingLists;
+        const error = kind === "library" ? block.libraryError : block.listError;
+        return (
+          <div key={block.key} className="rounded-md border border-gray-300 dark:border-navy-deep p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Site {idx + 1}</span>
+              {blocks.length > 1 && (
+                <button type="button" onClick={() => onRemove(block.key)} className="text-xs font-medium text-red-600 dark:text-red-400 hover:underline">
+                  Remove
+                </button>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <input
+                value={block.siteUrlInput}
+                onChange={(e) => onUpdate(block.key, { siteUrlInput: e.target.value })}
+                className="block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none"
+                placeholder={placeholder}
+              />
+              <button
+                type="button"
+                onClick={() => onLoad(block.key)}
+                disabled={loading || !block.siteUrlInput.trim()}
+                className="shrink-0 rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-navy-deep/30 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {loading ? "Loading..." : loadLabel}
+              </button>
+            </div>
+            {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
+            {options.length === 0 ? (
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Click &quot;{loadLabel}&quot; above to choose from this site&apos;s real {emptyLabel}.
+              </p>
+            ) : (
+              <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-gray-300 dark:border-navy-deep p-2">
+                {options.map((opt) => (
+                  <label key={opt} className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(opt)}
+                      onChange={() => onToggle(block.key, opt)}
+                      className="rounded border-gray-300 dark:border-navy-deep"
+                    />
+                    {opt}
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 export default function BotsPage() {
@@ -130,8 +309,27 @@ export default function BotsPage() {
   const [includeCategory, setIncludeCategory] = useState(false);
   const [sampleQuestionBlocks, setSampleQuestionBlocks] = useState<SampleQuestionBlock[]>([]);
   const [showJsonPreview, setShowJsonPreview] = useState(false);
-  const [contentType, setContentType] = useState<"library" | "list" | "web">("library");
+  const [contentType, setContentType] = useState<"library" | "list" | "web" | "list+library">("library");
   const [webSource, setWebSource] = useState<WebSourceFormState>(newWebSourceState());
+  // content_type=list+library bots only - see ai-search-engine/docs/
+  // LIST_PLUS_LIBRARY_BOT.md. Two independent SiteBlock arrays (library
+  // sites, list sites), plus the solved-gate discovery state and the
+  // per-source score weights.
+  const [librarySiteBlocks, setLibrarySiteBlocks] = useState<SiteBlock[]>([newSiteBlock()]);
+  const [listSiteBlocks, setListSiteBlocks] = useState<SiteBlock[]>([newSiteBlock()]);
+  // "<siteUrl>|||<listName>" - which of the selected list sources to
+  // discover the solved-gate's column/value dropdowns from.
+  const [solvedGateSelection, setSolvedGateSelection] = useState("");
+  const [columnOptions, setColumnOptions] = useState<string[]>([]);
+  const [loadingColumns, setLoadingColumns] = useState(false);
+  const [columnError, setColumnError] = useState("");
+  const [solvedStatusColumn, setSolvedStatusColumn] = useState("Status");
+  const [valueOptions, setValueOptions] = useState<string[]>([]);
+  const [loadingValues, setLoadingValues] = useState(false);
+  const [valueError, setValueError] = useState("");
+  const [solvedStatusValue, setSolvedStatusValue] = useState("Solved");
+  const [sourceWeightLibrary, setSourceWeightLibrary] = useState(1);
+  const [sourceWeightList, setSourceWeightList] = useState(1);
   // TEMPORARY - dev/production tenant toggle, for testing only. Remove this
   // state + the switch that renders it (below, near "Create Bot") once
   // testing against the dev tenant is no longer needed - see api.ts's
@@ -215,8 +413,41 @@ export default function BotsPage() {
       urlColumn: web.urlColumn || "URL",
       enableColumn: web.enableColumn || "Enable",
       enabledValue: web.enabledValue || "yes",
-      categoryColumn: web.categoryColumn || "Category",
+      // No "|| 'Category'" fallback here on purpose: an empty string is a
+      // real, meaningful state (no category column configured for this
+      // bot - WebSourceConfig.category_column allows null), not "unset -
+      // use the default." Forcing it back to the literal word "Category"
+      // would make it impossible to ever save a cleared value.
+      categoryColumn: web.categoryColumn || "",
+      showImages: web.showImages || "feeds_only",
     } : newWebSourceState());
+    // Seeded the same way as sharepointSites above, into the two independent
+    // arrays a list+library bot needs - see docs/LIST_PLUS_LIBRARY_BOT.md.
+    const lpl = bot.listPlusLibrary;
+    setLibrarySiteBlocks(lpl && lpl.librarySites.length > 0
+      ? lpl.librarySites.map((s) => ({
+          key: crypto.randomUUID(), siteUrlInput: s.siteUrl, loadedSiteUrl: s.siteUrl,
+          libraryOptions: s.libraries, selectedLibraries: s.libraries,
+          loadingLibraries: false, libraryError: "",
+          listOptions: [], selectedLists: [], loadingLists: false, listError: "",
+        }))
+      : [newSiteBlock()]);
+    setListSiteBlocks(lpl && lpl.listSites.length > 0
+      ? lpl.listSites.map((s) => ({
+          key: crypto.randomUUID(), siteUrlInput: s.siteUrl, loadedSiteUrl: s.siteUrl,
+          libraryOptions: [], selectedLibraries: [], loadingLibraries: false, libraryError: "",
+          listOptions: s.lists, selectedLists: s.lists, loadingLists: false, listError: "",
+        }))
+      : [newSiteBlock()]);
+    setSolvedStatusColumn(lpl?.solvedStatusColumn || "Status");
+    setSolvedStatusValue(lpl?.solvedStatusValue || "Solved");
+    setSourceWeightLibrary(lpl?.sourceWeights?.library ?? 1);
+    setSourceWeightList(lpl?.sourceWeights?.list ?? 1);
+    setSolvedGateSelection("");
+    setColumnOptions([]);
+    setColumnError("");
+    setValueOptions([]);
+    setValueError("");
     setFormError("");
     setResponseFieldBlocks(
       (bot.responseFields || []).map((f) => ({ key: crypto.randomUUID(), name: f.name, prompt: f.prompt }))
@@ -239,6 +470,17 @@ export default function BotsPage() {
     setContentType("library");
     setSiteBlocks([newSiteBlock()]);
     setWebSource(newWebSourceState());
+    setLibrarySiteBlocks([newSiteBlock()]);
+    setListSiteBlocks([newSiteBlock()]);
+    setSolvedStatusColumn("Status");
+    setSolvedStatusValue("Solved");
+    setSourceWeightLibrary(1);
+    setSourceWeightList(1);
+    setSolvedGateSelection("");
+    setColumnOptions([]);
+    setColumnError("");
+    setValueOptions([]);
+    setValueError("");
     setFormError("");
     setResponseFieldBlocks([]);
     setIncludeCategory(false);
@@ -439,6 +681,86 @@ export default function BotsPage() {
     }
   }
 
+  // Same "load real columns" pattern as the list+library Solved Gate, for a
+  // web bot's ID/URL/Enable/Category column pickers.
+  async function handleLoadColumnsForWebSource() {
+    const siteUrl = webSource.loadedSiteUrl || webSource.siteUrlInput.trim();
+    if (!siteUrl || !webSource.selectedList) {
+      setWebSource((prev) => ({ ...prev, columnError: "Choose a source list above first." }));
+      return;
+    }
+    setWebSource((prev) => ({ ...prev, loadingColumns: true, columnError: "" }));
+    try {
+      const columns = await api.getSharePointListColumns(siteUrl, webSource.selectedList);
+      setWebSource((prev) => ({ ...prev, columnOptions: columns, loadingColumns: false }));
+    } catch (error: any) {
+      setWebSource((prev) => ({ ...prev, columnError: error?.message || "Failed to load columns for that list.", loadingColumns: false }));
+    }
+  }
+
+  // Distinct real values of whichever column is currently picked as
+  // enableColumn - lets enabledValue be chosen from a dropdown too, exactly
+  // like the Solved Gate's status column -> solved value flow.
+  async function handleLoadValuesForWebSource() {
+    const siteUrl = webSource.loadedSiteUrl || webSource.siteUrlInput.trim();
+    if (!siteUrl || !webSource.selectedList || !webSource.enableColumn) {
+      setWebSource((prev) => ({ ...prev, valueError: "Pick an Enable column first." }));
+      return;
+    }
+    setWebSource((prev) => ({ ...prev, loadingValues: true, valueError: "" }));
+    try {
+      const values = await api.getSharePointListColumnValues(siteUrl, webSource.selectedList, webSource.enableColumn);
+      setWebSource((prev) => ({ ...prev, valueOptions: values, loadingValues: false }));
+    } catch (error: any) {
+      setWebSource((prev) => ({ ...prev, valueError: error?.message || "Failed to load values for that column.", loadingValues: false }));
+    }
+  }
+
+  // Every list currently selected across listSiteBlocks, for the solved-gate
+  // list picker below - a list+library bot can have several list sources,
+  // but the gate is one column/value pinned across all of them (mirrors
+  // ListPlusLibraryConfig.solved_status_column being a single value).
+  const solvedGateListChoices = listSiteBlocks.flatMap((b) =>
+    b.selectedLists.map((l) => ({
+      value: `${b.loadedSiteUrl || b.siteUrlInput.trim()}|||${l}`,
+      label: `${l}  (${b.loadedSiteUrl || b.siteUrlInput.trim()})`,
+    }))
+  );
+
+  async function handleLoadColumnsForSolvedGate() {
+    const [siteUrl, listName] = solvedGateSelection.split("|||");
+    if (!siteUrl || !listName) {
+      setColumnError("Pick a list above first.");
+      return;
+    }
+    setLoadingColumns(true);
+    setColumnError("");
+    try {
+      setColumnOptions(await api.getSharePointListColumns(siteUrl, listName));
+    } catch (error: any) {
+      setColumnError(error?.message || "Failed to load columns for that list.");
+    } finally {
+      setLoadingColumns(false);
+    }
+  }
+
+  async function handleLoadValuesForSolvedGate() {
+    const [siteUrl, listName] = solvedGateSelection.split("|||");
+    if (!siteUrl || !listName || !solvedStatusColumn) {
+      setValueError("Pick a status column above first.");
+      return;
+    }
+    setLoadingValues(true);
+    setValueError("");
+    try {
+      setValueOptions(await api.getSharePointListColumnValues(siteUrl, listName, solvedStatusColumn));
+    } catch (error: any) {
+      setValueError(error?.message || "Failed to load values for that column.");
+    } finally {
+      setLoadingValues(false);
+    }
+  }
+
   useEffect(() => {
     if (!authReady) return;
     loadBots();
@@ -500,6 +822,15 @@ export default function BotsPage() {
         setFormError("Enter a SharePoint site URL and choose a source list before creating this bot.");
         return;
       }
+    } else if (contentType === "list+library") {
+      // Both sources are REQUIRED (not "at least one of the two") - the
+      // whole point of this content type is answering from both at once.
+      const hasLibrary = librarySiteBlocks.some((b) => b.selectedLibraries.length > 0);
+      const hasList = listSiteBlocks.some((b) => b.selectedLists.length > 0);
+      if (!hasLibrary || !hasList) {
+        setFormError("Add at least one library AND at least one list before creating this list+library bot.");
+        return;
+      }
     } else {
       const sourceLabel = contentType === "list" ? "list" : "library";
       const hasEmptyBlock = contentType === "list"
@@ -549,7 +880,7 @@ export default function BotsPage() {
       name: formData.get("name") as string,
       route: formData.get("route") as string,
       contentType,
-      sharepointSites: contentType === "web" ? [] : siteBlocks.map((b) => ({
+      sharepointSites: (contentType === "web" || contentType === "list+library") ? [] : siteBlocks.map((b) => ({
         siteUrl: b.loadedSiteUrl || b.siteUrlInput.trim(),
         libraries: contentType === "library" ? b.selectedLibraries : [],
         lists: contentType === "list" ? b.selectedLists : [],
@@ -562,6 +893,26 @@ export default function BotsPage() {
         enableColumn: webSource.enableColumn.trim() || "Enable",
         enabledValue: webSource.enabledValue.trim() || "yes",
         categoryColumn: webSource.categoryColumn.trim(),
+        showImages: webSource.showImages,
+      } : undefined,
+      listPlusLibrary: contentType === "list+library" ? {
+        librarySites: librarySiteBlocks.map((b) => ({
+          siteUrl: b.loadedSiteUrl || b.siteUrlInput.trim(), libraries: b.selectedLibraries, lists: [],
+        })),
+        listSites: listSiteBlocks.map((b) => ({
+          siteUrl: b.loadedSiteUrl || b.siteUrlInput.trim(), libraries: [], lists: b.selectedLists,
+        })),
+        solvedStatusColumn: solvedStatusColumn.trim() || "Status",
+        solvedStatusValue: solvedStatusValue.trim() || "Solved",
+        categoryColumn: "Category",
+        subcategoryColumn: "SubCategory",
+        sourceWeights: { library: sourceWeightLibrary, list: sourceWeightList },
+        // Immutable after creation, same as qdrantCollection below - carry
+        // the existing bot's collection names through on edit; a brand-new
+        // bot leaves these empty and toBotConfigPayload derives them from
+        // the bot id.
+        libraryCollection: isEditing?.listPlusLibrary?.libraryCollection || "",
+        listCollection: isEditing?.listPlusLibrary?.listCollection || "",
       } : undefined,
       qdrantCollection: formData.get("qdrantCollection") as string,
       llmModel: formData.get("llmModel") as string,
@@ -583,10 +934,15 @@ export default function BotsPage() {
         .filter((text) => text.length > 0),
     };
 
-    if (isEditing) {
-      await api.updateBot(isEditing.id, data);
-    } else {
-      await api.createBot(data);
+    try {
+      if (isEditing) {
+        await api.updateBot(isEditing.id, data);
+      } else {
+        await api.createBot(data);
+      }
+    } catch (error: any) {
+      setFormError(error?.message || "Failed to save this bot - please try again.");
+      return;
     }
 
     closeForm();
@@ -600,6 +956,17 @@ export default function BotsPage() {
     setContentType("library");
     setSiteBlocks([]);
     setWebSource(newWebSourceState());
+    setLibrarySiteBlocks([newSiteBlock()]);
+    setListSiteBlocks([newSiteBlock()]);
+    setSolvedStatusColumn("Status");
+    setSolvedStatusValue("Solved");
+    setSourceWeightLibrary(1);
+    setSourceWeightList(1);
+    setSolvedGateSelection("");
+    setColumnOptions([]);
+    setColumnError("");
+    setValueOptions([]);
+    setValueError("");
     setFormError("");
     setResponseFieldBlocks([]);
     setPromptBeforeImprove(null);
@@ -761,9 +1128,9 @@ export default function BotsPage() {
               <div className="sm:col-span-2">
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Content Type</label>
                 <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
-                  A bot pulls from document libraries (files), SharePoint Lists (rows), or a scraped list of web URLs - never more than one, and can&apos;t be changed after creation.
+                  A bot pulls from document libraries (files), SharePoint Lists (rows), a scraped list of web URLs, or a library AND a list together - can&apos;t be changed after creation.
                 </p>
-                <div className="flex gap-4">
+                <div className="flex flex-wrap gap-4">
                   <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
                     <input
                       type="radio"
@@ -797,9 +1164,171 @@ export default function BotsPage() {
                     />
                     Web (URLs)
                   </label>
+                  <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                    <input
+                      type="radio"
+                      name="contentTypeRadio"
+                      checked={contentType === "list+library"}
+                      disabled={!!isEditing}
+                      onChange={() => setContentType("list+library")}
+                      className="border-gray-300 dark:border-navy-deep"
+                    />
+                    Library + List (combined)
+                  </label>
                 </div>
               </div>
-              {contentType === "web" ? (
+              {contentType === "list+library" ? (
+                <div className="sm:col-span-2 space-y-4">
+                  <div>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                      Answers from BOTH sources at once, merged by relevance - both are always searched, never a fallback. See docs/LIST_PLUS_LIBRARY_BOT.md.
+                    </p>
+                  </div>
+                  <CombinedSiteBlockEditor
+                    blocks={librarySiteBlocks}
+                    kind="library"
+                    label="Library Sources (KB)"
+                    placeholder="https://contoso.sharepoint.com/sites/helpdesk"
+                    onAdd={() => addBlockIn(setLibrarySiteBlocks)}
+                    onRemove={(key) => removeBlockIn(setLibrarySiteBlocks, key)}
+                    onUpdate={(key, patch) => updateBlockIn(setLibrarySiteBlocks, key, patch)}
+                    onLoad={(key) => loadOptionsIn("library", librarySiteBlocks, setLibrarySiteBlocks, key)}
+                    onToggle={(key, value) => toggleOptionIn("library", setLibrarySiteBlocks, key, value)}
+                  />
+                  <CombinedSiteBlockEditor
+                    blocks={listSiteBlocks}
+                    kind="list"
+                    label="List Sources (e.g. resolved tickets)"
+                    placeholder="https://contoso.sharepoint.com/sites/helpdesk"
+                    onAdd={() => addBlockIn(setListSiteBlocks)}
+                    onRemove={(key) => removeBlockIn(setListSiteBlocks, key)}
+                    onUpdate={(key, patch) => updateBlockIn(setListSiteBlocks, key, patch)}
+                    onLoad={(key) => loadOptionsIn("list", listSiteBlocks, setListSiteBlocks, key)}
+                    onToggle={(key, value) => toggleOptionIn("list", setListSiteBlocks, key, value)}
+                  />
+
+                  <div className="rounded-md border border-gray-300 dark:border-navy-deep p-3 space-y-3">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Solved Gate</label>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                        Only rows where this column equals this value are ever indexed from the list side - picked from real SharePoint data, no typing/guessing.
+                      </p>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">List to discover columns/values from</label>
+                      <select
+                        value={solvedGateSelection}
+                        onChange={(e) => setSolvedGateSelection(e.target.value)}
+                        className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none"
+                      >
+                        <option value="">Select a list...</option>
+                        {solvedGateListChoices.map((c) => (
+                          <option key={c.value} value={c.value}>{c.label}</option>
+                        ))}
+                      </select>
+                      {solvedGateListChoices.length === 0 && (
+                        <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                          Select at least one list above first.
+                        </p>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div>
+                        <div className="flex items-center justify-between">
+                          <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">Status column</label>
+                          <button
+                            type="button"
+                            onClick={handleLoadColumnsForSolvedGate}
+                            disabled={loadingColumns || !solvedGateSelection}
+                            className="text-xs font-medium text-orange hover:text-orange-hover disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {loadingColumns ? "Loading..." : "Load Columns"}
+                          </button>
+                        </div>
+                        {columnError && <p className="text-xs text-red-600 dark:text-red-400">{columnError}</p>}
+                        {columnOptions.length === 0 ? (
+                          <input
+                            value={solvedStatusColumn}
+                            onChange={(e) => setSolvedStatusColumn(e.target.value)}
+                            className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none"
+                            placeholder="Status"
+                          />
+                        ) : (
+                          <select
+                            value={solvedStatusColumn}
+                            onChange={(e) => setSolvedStatusColumn(e.target.value)}
+                            className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none"
+                          >
+                            {columnOptions.map((c) => (
+                              <option key={c} value={c}>{c}</option>
+                            ))}
+                          </select>
+                        )}
+                      </div>
+                      <div>
+                        <div className="flex items-center justify-between">
+                          <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">Solved value</label>
+                          <button
+                            type="button"
+                            onClick={handleLoadValuesForSolvedGate}
+                            disabled={loadingValues || !solvedGateSelection || !solvedStatusColumn}
+                            className="text-xs font-medium text-orange hover:text-orange-hover disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {loadingValues ? "Loading..." : "Load Values"}
+                          </button>
+                        </div>
+                        {valueError && <p className="text-xs text-red-600 dark:text-red-400">{valueError}</p>}
+                        {valueOptions.length === 0 ? (
+                          <input
+                            value={solvedStatusValue}
+                            onChange={(e) => setSolvedStatusValue(e.target.value)}
+                            className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none"
+                            placeholder="Solved"
+                          />
+                        ) : (
+                          <select
+                            value={solvedStatusValue}
+                            onChange={(e) => setSolvedStatusValue(e.target.value)}
+                            className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none"
+                          >
+                            {valueOptions.map((v) => (
+                              <option key={v} value={v}>{v}</option>
+                            ))}
+                          </select>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-md border border-gray-300 dark:border-navy-deep p-3">
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Source Weights</label>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">
+                      Score multipliers applied before the two sources are merged and ranked together. 1.0 / 1.0 is an equal, unweighted merge.
+                    </p>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">Library weight</label>
+                        <input
+                          type="number" step="0.1" min="0.1"
+                          value={sourceWeightLibrary}
+                          onChange={(e) => setSourceWeightLibrary(parseFloat(e.target.value) || 1)}
+                          className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">List weight</label>
+                        <input
+                          type="number" step="0.1" min="0.1"
+                          value={sourceWeightList}
+                          onChange={(e) => setSourceWeightList(parseFloat(e.target.value) || 1)}
+                          className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  {formError && <p className="text-xs text-red-600 dark:text-red-400">{formError}</p>}
+                </div>
+              ) : contentType === "web" ? (
                 <div className="sm:col-span-2 space-y-3">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Web Source</label>
@@ -846,51 +1375,159 @@ export default function BotsPage() {
                       </div>
                     )}
                   </div>
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                      Pick real column names from the chosen list instead of typing them - no typos.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={handleLoadColumnsForWebSource}
+                      disabled={webSource.loadingColumns || !webSource.selectedList}
+                      className="shrink-0 text-xs font-medium text-orange hover:text-orange-hover disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {webSource.loadingColumns ? "Loading..." : "Load Columns"}
+                    </button>
+                  </div>
+                  {webSource.columnError && <p className="text-xs text-red-600 dark:text-red-400">{webSource.columnError}</p>}
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                     <div>
                       <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">ID column</label>
-                      <input
-                        value={webSource.idColumn}
-                        onChange={(e) => setWebSource((prev) => ({ ...prev, idColumn: e.target.value }))}
-                        className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
-                      />
+                      {webSource.columnOptions.length === 0 ? (
+                        <input
+                          value={webSource.idColumn}
+                          onChange={(e) => setWebSource((prev) => ({ ...prev, idColumn: e.target.value }))}
+                          className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
+                        />
+                      ) : (
+                        <select
+                          value={webSource.idColumn}
+                          onChange={(e) => setWebSource((prev) => ({ ...prev, idColumn: e.target.value }))}
+                          className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
+                        >
+                          {webSource.columnOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      )}
                     </div>
                     <div>
                       <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">URL column</label>
-                      <input
-                        value={webSource.urlColumn}
-                        onChange={(e) => setWebSource((prev) => ({ ...prev, urlColumn: e.target.value }))}
-                        className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
-                      />
+                      {webSource.columnOptions.length === 0 ? (
+                        <input
+                          value={webSource.urlColumn}
+                          onChange={(e) => setWebSource((prev) => ({ ...prev, urlColumn: e.target.value }))}
+                          className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
+                        />
+                      ) : (
+                        <select
+                          value={webSource.urlColumn}
+                          onChange={(e) => setWebSource((prev) => ({ ...prev, urlColumn: e.target.value }))}
+                          className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
+                        >
+                          {webSource.columnOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      )}
                     </div>
                     <div>
                       <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">Enable column</label>
-                      <input
-                        value={webSource.enableColumn}
-                        onChange={(e) => setWebSource((prev) => ({ ...prev, enableColumn: e.target.value }))}
-                        className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
-                      />
+                      {webSource.columnOptions.length === 0 ? (
+                        <input
+                          value={webSource.enableColumn}
+                          onChange={(e) => setWebSource((prev) => ({ ...prev, enableColumn: e.target.value, valueOptions: [] }))}
+                          className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
+                        />
+                      ) : (
+                        <select
+                          value={webSource.enableColumn}
+                          onChange={(e) => setWebSource((prev) => ({ ...prev, enableColumn: e.target.value, valueOptions: [] }))}
+                          className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
+                        >
+                          {webSource.columnOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      )}
                     </div>
                     <div>
-                      <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">Enabled value</label>
-                      <input
-                        value={webSource.enabledValue}
-                        onChange={(e) => setWebSource((prev) => ({ ...prev, enabledValue: e.target.value }))}
-                        className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
-                      />
+                      <div className="flex items-center justify-between">
+                        <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">Enabled value</label>
+                        <button
+                          type="button"
+                          onClick={handleLoadValuesForWebSource}
+                          disabled={webSource.loadingValues || !webSource.enableColumn}
+                          className="text-[11px] font-medium text-orange hover:text-orange-hover disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {webSource.loadingValues ? "Loading..." : "Load Values"}
+                        </button>
+                      </div>
+                      {webSource.valueOptions.length === 0 ? (
+                        <input
+                          value={webSource.enabledValue}
+                          onChange={(e) => setWebSource((prev) => ({ ...prev, enabledValue: e.target.value }))}
+                          className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
+                        />
+                      ) : (
+                        <select
+                          value={webSource.enabledValue}
+                          onChange={(e) => setWebSource((prev) => ({ ...prev, enabledValue: e.target.value }))}
+                          className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
+                        >
+                          {webSource.valueOptions.map((v) => <option key={v} value={v}>{v}</option>)}
+                        </select>
+                      )}
+                      {webSource.valueError && <p className="mt-1 text-[11px] text-red-600 dark:text-red-400">{webSource.valueError}</p>}
                     </div>
                     <div className="col-span-2">
                       <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">Category column (optional)</label>
-                      <input
-                        value={webSource.categoryColumn}
-                        onChange={(e) => setWebSource((prev) => ({ ...prev, categoryColumn: e.target.value }))}
-                        className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
-                      />
+                      {webSource.columnOptions.length === 0 ? (
+                        <input
+                          value={webSource.categoryColumn}
+                          onChange={(e) => setWebSource((prev) => ({ ...prev, categoryColumn: e.target.value }))}
+                          className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
+                        />
+                      ) : (
+                        <select
+                          value={webSource.categoryColumn}
+                          onChange={(e) => setWebSource((prev) => ({ ...prev, categoryColumn: e.target.value }))}
+                          className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-2 py-1.5 text-sm focus:border-orange focus:outline-none"
+                        >
+                          <option value="">(none)</option>
+                          {webSource.columnOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      )}
                     </div>
                   </div>
                   <p className="text-xs text-gray-500 dark:text-gray-400">
                     Fetch etiquette (robots.txt, rate limits, User-Agent, feed preference) uses sensible defaults not shown here - edit the bot&apos;s YAML directly to tune those. See docs/WEB_SOURCE_BOT.md.
                   </p>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Show Images</label>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
+                      Controls which images are allowed to show as thumbnails in chat.
+                    </p>
+                    <div className="space-y-1.5">
+                      <label className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+                        <input
+                          type="radio" name="showImages" className="mt-0.5 border-gray-300 dark:border-navy-deep"
+                          checked={webSource.showImages === "feeds_only"}
+                          onChange={() => setWebSource((prev) => ({ ...prev, showImages: "feeds_only" }))}
+                        />
+                        <span><strong>Feeds only</strong> (default) - only images the RSS/Atom feed itself declares. Publisher-provided, lowest copyright risk.</span>
+                      </label>
+                      <label className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+                        <input
+                          type="radio" name="showImages" className="mt-0.5 border-gray-300 dark:border-navy-deep"
+                          checked={webSource.showImages === "all"}
+                          onChange={() => setWebSource((prev) => ({ ...prev, showImages: "all" }))}
+                        />
+                        <span><strong>All</strong> - also allows images scraped from plain web pages (og:image tags). Less certain who has rights to them.</span>
+                      </label>
+                      <label className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+                        <input
+                          type="radio" name="showImages" className="mt-0.5 border-gray-300 dark:border-navy-deep"
+                          checked={webSource.showImages === "off"}
+                          onChange={() => setWebSource((prev) => ({ ...prev, showImages: "off" }))}
+                        />
+                        <span><strong>Off</strong> - never show images for this bot.</span>
+                      </label>
+                    </div>
+                  </div>
                   {formError && <p className="text-xs text-red-600 dark:text-red-400">{formError}</p>}
                 </div>
               ) : (
@@ -998,6 +1635,28 @@ export default function BotsPage() {
                 {formError && <p className="text-xs text-red-600 dark:text-red-400">{formError}</p>}
               </div>
               )}
+              {contentType === "list+library" ? (
+                <div className="sm:col-span-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Library Qdrant Collection</label>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">Auto-generated, can never change after creation.</p>
+                    <input
+                      readOnly disabled
+                      value={isEditing?.listPlusLibrary?.libraryCollection || `${collectionPreview || "(fill in above)"}_library`}
+                      className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-gray-50 dark:bg-navy-deep/40 text-gray-500 dark:text-gray-400 px-3 py-2 text-sm cursor-not-allowed"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">List Qdrant Collection</label>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">Auto-generated, can never change after creation.</p>
+                    <input
+                      readOnly disabled
+                      value={isEditing?.listPlusLibrary?.listCollection || `${collectionPreview || "(fill in above)"}_list`}
+                      className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-gray-50 dark:bg-navy-deep/40 text-gray-500 dark:text-gray-400 px-3 py-2 text-sm cursor-not-allowed"
+                    />
+                  </div>
+                </div>
+              ) : (
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Qdrant Collection Name</label>
                 <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
@@ -1009,8 +1668,9 @@ export default function BotsPage() {
                   value={collectionPreview || "(fill in Route or Bot Name above)"}
                   className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-gray-50 dark:bg-navy-deep/40 text-gray-500 dark:text-gray-400 px-3 py-2 text-sm cursor-not-allowed"
                 />
-                <input type="hidden" name="qdrantCollection" value={collectionPreview} />
               </div>
+              )}
+              <input type="hidden" name="qdrantCollection" value={collectionPreview} />
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">LLM Model</label>
                 <select name="llmModel" defaultValue={isEditing?.llmModel || availableModels.llm[0] || ""} className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none">

@@ -62,6 +62,37 @@ export interface WebSourceEntry {
   enableColumn: string;
   enabledValue: string;
   categoryColumn: string;
+  // Which images (if any) show as chat thumbnails - see app/bots/schema.py's
+  // WebSourceConfig.show_images. The value itself (not just the key) matches
+  // the backend's literal string exactly - no camelCase conversion, unlike
+  // object keys elsewhere in this file. Optional/absent on very old bots
+  // created before this field existed - the form treats that the same as
+  // the backend default ("feeds_only").
+  showImages?: "feeds_only" | "all" | "off";
+}
+
+// content_type: list+library bots (ai-search-engine/app/bots/schema.py
+// ListPlusLibraryConfig) answer from a document library AND a SharePoint
+// List at once, merged by relevance - never a sequential fallback. Two
+// independent site groups (librarySites/listSites) since a library and a
+// list on the same SharePointSite entry would collide with the existing
+// library/list mutual-exclusivity rule other content types rely on.
+export interface ListPlusLibraryEntry {
+  librarySites: SharePointSiteEntry[];
+  listSites: SharePointSiteEntry[];
+  // The solved-gate: only rows where solvedStatusColumn == solvedStatusValue
+  // are ever indexed from the list side. Picked live from real SharePoint
+  // data via getSharePointListColumns/getSharePointListColumnValues below -
+  // never typed/guessed.
+  solvedStatusColumn: string;
+  solvedStatusValue: string;
+  categoryColumn: string;
+  subcategoryColumn: string;
+  sourceWeights: { library: number; list: number };
+  // Two REAL, separate Qdrant collections (not one shared collection) - see
+  // app/bots/schema.py's VectorStoreConfig.
+  libraryCollection: string;
+  listCollection: string;
 }
 
 export interface Bot {
@@ -70,10 +101,23 @@ export interface Bot {
   route: string;
   enabled: boolean;
   // A bot is a "Library bot" (files), a "List bot" (SharePoint List rows),
-  // or a "Web bot" (scraped URLs) - never more than one at once (hybrid is
-  // a possible future addition, not supported yet). Immutable after
-  // creation - see config_writer.py.
-  contentType?: "library" | "list" | "web";
+  // a "Web bot" (scraped URLs), or a "List+Library bot" (both a library and
+  // a list at once) - never more than one at once for the first three;
+  // list+library is the only hybrid type. Immutable after creation - see
+  // config_writer.py.
+  contentType?: "library" | "list" | "web" | "list+library";
+  // list+library bots only - see ListPlusLibraryEntry.
+  listPlusLibrary?: ListPlusLibraryEntry;
+  // The bot's SharePoint/Graph tenant slug and the SharePoint column-gate
+  // fields (app/bots/schema.py SharePointConfig) - no form UI collects
+  // these yet, but toBotConfigPayload must round-trip whatever came back
+  // from getBots() rather than silently resetting them to schema defaults
+  // on every save (see the TEMPORARY tenant toggle note below).
+  tenant?: string;
+  sharepointStatusColumn?: string;
+  sharepointPublishedValue?: string;
+  sharepointCategoryColumn?: string;
+  sharepointSubcategoryColumn?: string;
   // Additional fields for the form that might not exist in the basic list yet.
   // A bot can pull from more than one SharePoint site, each with its own
   // libraries/lists - names are only unique WITHIN a site. Library/list
@@ -360,47 +404,87 @@ export function deriveBotId(data: Partial<Bot>): string {
 
 // Maps the flat form fields the Bot Management page collects into the nested
 // BotConfig shape the backend requires (app/bots/schema.py). Fields the form
-// does not collect (sharepoint.tenant/web.tenant, prompt.temperature,
-// indexing chunk sizes, and every WebSourceConfig fetch-etiquette setting -
-// user_agent/timeouts/rate-limit/robots/feeds) fall back to the same
-// defaults BotConfig itself uses, except `tenant`, which has no safe
-// default - see getSharePointTenant() (TEMPORARY dev/production toggle
-// above). An admin who needs to tune those specific fetch settings per bot
-// still can by hand-editing the YAML - see docs/WEB_SOURCE_BOT.md.
+// does not collect (prompt.temperature, indexing chunk sizes, and every
+// WebSourceConfig fetch-etiquette setting - user_agent/timeouts/rate-limit/
+// robots/feeds) fall back to the same defaults BotConfig itself uses. Tenant
+// and the SharePoint column-gate fields (status_column/published_value/
+// category_column/subcategory_column) DO have a per-bot value that must
+// survive an edit, even with no form control for them yet - `data` carries
+// them straight through from getBots() (see the Bot type + list_bots in
+// admin.py) via handleSave's `{...isEditing, ...formFields}` spread, so
+// preferring them here (falling back to defaults / the tenant toggle only
+// when truly absent, i.e. a brand-new bot) is what stops every save from
+// silently reverting them - see getSharePointTenant() (TEMPORARY
+// dev/production toggle above) for why a NEW bot still needs the toggle.
 function toBotConfigPayload(botId: string, data: Partial<Bot>) {
   const isWeb = data.contentType === "web";
+  const isListPlusLibrary = data.contentType === "list+library";
   return {
     id: botId,
     name: data.name,
     route: data.route,
     enabled: data.enabled ?? true,
     content_type: data.contentType || "library",
-    // Mutually exclusive - a web bot sets `web`, never `sharepoint`
+    // Mutually exclusive - a web bot sets `web`, a list+library bot sets
+    // `list_plus_library`, everything else sets `sharepoint`
     // (app/bots/schema.py's _valid_content_source enforces this server-side
-    // too; omitting the unused key here rather than sending an empty one
+    // too; omitting the unused keys here rather than sending empty ones
     // avoids relying on that validator alone to catch a form bug).
     ...(isWeb
       ? {
           web: {
-            tenant: getSharePointTenant(),
+            tenant: data.tenant || getSharePointTenant(),
             site_url: data.webSource?.siteUrl || "",
             source_list: data.webSource?.sourceList || "",
             id_column: data.webSource?.idColumn || "ID",
             url_column: data.webSource?.urlColumn || "URL",
             enable_column: data.webSource?.enableColumn || "Enable",
             enabled_value: data.webSource?.enabledValue || "yes",
-            category_column: data.webSource?.categoryColumn || "Category",
+            // "" means the admin explicitly cleared the field (no category
+            // column for this bot) - must reach the backend as null, not
+            // silently coerced back to the literal default "Category".
+            category_column: data.webSource?.categoryColumn?.trim()
+              ? data.webSource.categoryColumn.trim()
+              : null,
+            show_images: data.webSource?.showImages || "feeds_only",
+          },
+        }
+      : isListPlusLibrary
+      ? {
+          list_plus_library: {
+            tenant: data.tenant || getSharePointTenant(),
+            library_sites: (data.listPlusLibrary?.librarySites || []).map((s) => ({ site_url: s.siteUrl, libraries: s.libraries, lists: [] })),
+            list_sites: (data.listPlusLibrary?.listSites || []).map((s) => ({ site_url: s.siteUrl, libraries: [], lists: s.lists })),
+            solved_status_column: data.listPlusLibrary?.solvedStatusColumn || "Status",
+            solved_status_value: data.listPlusLibrary?.solvedStatusValue || "Solved",
+            category_column: data.listPlusLibrary?.categoryColumn || "Category",
+            subcategory_column: data.listPlusLibrary?.subcategoryColumn || "SubCategory",
+            source_weights: {
+              library: data.listPlusLibrary?.sourceWeights?.library ?? 1.0,
+              list: data.listPlusLibrary?.sourceWeights?.list ?? 1.0,
+            },
           },
         }
       : {
           sharepoint: {
-            tenant: getSharePointTenant(),
+            tenant: data.tenant || getSharePointTenant(),
             sites: (data.sharepointSites || []).map((s) => ({ site_url: s.siteUrl, libraries: s.libraries, lists: s.lists })),
+            status_column: data.sharepointStatusColumn || "Status",
+            published_value: data.sharepointPublishedValue || "Published",
+            category_column: data.sharepointCategoryColumn || "Category",
+            subcategory_column: data.sharepointSubcategoryColumn || "SubCategory",
           },
         }),
-    vectorstore: {
-      collection: data.qdrantCollection || botId,
-    },
+    // list+library bots use TWO real collections, not one shared `collection`
+    // (app/bots/schema.py's VectorStoreConfig) - see docs/LIST_PLUS_LIBRARY_BOT.md.
+    vectorstore: isListPlusLibrary
+      ? {
+          library_collection: data.listPlusLibrary?.libraryCollection || `${botId}_library`,
+          list_collection: data.listPlusLibrary?.listCollection || `${botId}_list`,
+        }
+      : {
+          collection: data.qdrantCollection || botId,
+        },
     models: {
       llm: data.llmModel || "gpt-4o-mini",
       embedding: data.embeddingModel || "bge-base-en-v1.5",
@@ -478,6 +562,23 @@ export const api = {
     // Same idea as getSharePointLibraries, but for genuine SharePoint Lists
     // (app/api/routes/admin.py sharepoint_lists) - powers a List bot's picker.
     return fetcher<string[]>(`/admin/sharepoint/lists${buildQuery({ site_url: siteUrl, tenant: getSharePointTenant() })}`);
+  },
+
+  async getSharePointListColumns(siteUrl: string, listName: string): Promise<string[]> {
+    if (USE_MOCKS) return ["Status", "Category", "Resolution", "AssignedTo"];
+    // Live column discovery for a list+library bot's solved-gate (app/api/
+    // routes/admin.py sharepoint_list_columns) - real internal field names
+    // from real rows, so the admin never has to know/guess a Graph field
+    // name to pin the status column.
+    return fetcher<string[]>(`/admin/sharepoint/list-columns${buildQuery({ site_url: siteUrl, list_name: listName, tenant: getSharePointTenant() })}`);
+  },
+
+  async getSharePointListColumnValues(siteUrl: string, listName: string, column: string): Promise<string[]> {
+    if (USE_MOCKS) return ["Open", "In Progress", "Solved"];
+    // Distinct values for the chosen status column (app/api/routes/admin.py
+    // sharepoint_list_column_values) - lets the admin pick the exact
+    // "solved" value (e.g. "Solved"/"Closed"/"Resolved") from a dropdown.
+    return fetcher<string[]>(`/admin/sharepoint/list-column-values${buildQuery({ site_url: siteUrl, list_name: listName, column, tenant: getSharePointTenant() })}`);
   },
 
   async getChatHistory(params?: { bot_id?: string; user_id?: string; keyword?: string; limit?: number }): Promise<ChatHistoryRow[]> {
