@@ -1,6 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import { AnswerChart } from "@/components/chat/AnswerChart";
-import { citationPageLabel, groupCitations } from "@/lib/citations";
+import { CitationImageGallery } from "@/components/chat/CitationThumbnail";
+import { citationPageLabel, firstImageSet, groupCitations } from "@/lib/citations";
 import { cn } from "@/lib/utils";
 import { AlertCircle, Check, Copy, ExternalLink, Pencil, ThumbsDown, ThumbsUp } from "lucide-react";
 import type { MessageItemProps } from "./types";
@@ -41,11 +42,12 @@ export function ConsoleMessage(props: MessageItemProps) {
   } = props;
 
   const groups = msg.citations ? groupCitations(msg.citations) : [];
+  const heroImages = firstImageSet(groups);
   const tag = msg.role === "user" ? "USER" : "BOT";
 
   return (
     <div
-      className="group w-full font-mono text-[12.5px]"
+      className="group w-full font-mono text-[12.5px] animate-fade-in-up"
       style={{ background: msg.role === "user" ? PALETTE.panel : "transparent", borderBottom: `1px solid ${PALETTE.border}`, color: PALETTE.text }}
     >
       <div className="flex gap-3 px-4 py-3">
@@ -85,6 +87,12 @@ export function ConsoleMessage(props: MessageItemProps) {
             </div>
           ) : msg.role === "bot" ? (
             <div className="leading-relaxed [&>*:last-child]:mb-0">
+              <CitationImageGallery
+                images={heroImages}
+                className="mb-2"
+                heroClassName="max-h-56 w-full rounded-sm bg-white/5 object-contain"
+                thumbClassName="h-12 w-12 shrink-0 rounded-sm object-cover"
+              />
               <ReactMarkdown components={MARKDOWN_COMPONENTS}>{msg.content}</ReactMarkdown>
             </div>
           ) : (

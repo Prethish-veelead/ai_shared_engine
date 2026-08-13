@@ -7,6 +7,11 @@ export interface Citation {
   source: string;
   page: number | null;
   url: string | null;
+  // Image URLs - web bots only, gated per-bot by the backend's
+  // WebSourceConfig.show_images (URL passthrough, never hosted here). The
+  // lead/thumbnail image is always first, followed by real in-body content
+  // images. Always [] for every library/list citation.
+  image_urls: string[];
 }
 
 export interface ChartSpec {

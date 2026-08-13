@@ -1,6 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import { AnswerChart } from "@/components/chat/AnswerChart";
-import { citationPageLabel, groupCitations } from "@/lib/citations";
+import { CitationImageGallery } from "@/components/chat/CitationThumbnail";
+import { citationPageLabel, firstImageSet, groupCitations } from "@/lib/citations";
 import { cn } from "@/lib/utils";
 import { AlertCircle, Check, Copy, ExternalLink, Pencil, ThumbsDown, ThumbsUp } from "lucide-react";
 import type { MessageItemProps } from "./types";
@@ -30,10 +31,13 @@ export function CurrentMessage(props: MessageItemProps) {
     onSubmitComment, onSkipComment, onFollowUpClick,
   } = props;
 
+  const citationGroups = msg.role === "bot" && msg.citations ? groupCitations(msg.citations) : [];
+  const heroImages = firstImageSet(citationGroups);
+
   return (
     <div
       className={cn(
-        "group flex max-w-[85%] sm:max-w-[75%] flex-col gap-2 relative",
+        "group flex max-w-[85%] sm:max-w-[75%] flex-col gap-2 relative animate-fade-in-up",
         msg.role === "user" ? "ml-auto items-end" : "mr-auto items-start"
       )}
     >
@@ -85,15 +89,21 @@ export function CurrentMessage(props: MessageItemProps) {
           </div>
         ) : msg.role === "bot" ? (
           <div className="[&>*:last-child]:mb-0">
+            <CitationImageGallery
+              images={heroImages}
+              className="mb-3"
+              heroClassName="max-h-64 w-full rounded-xl bg-black/5 object-contain dark:bg-white/5"
+              thumbClassName="h-14 w-14 shrink-0 rounded-lg object-cover"
+            />
             <ReactMarkdown components={MARKDOWN_COMPONENTS}>{msg.content}</ReactMarkdown>
           </div>
         ) : (
           <div className="whitespace-pre-wrap">{msg.content}</div>
         )}
 
-        {msg.citations && msg.citations.length > 0 && (
+        {citationGroups.length > 0 && (
           <div className="mt-4 flex flex-wrap gap-2 pt-3 border-t border-black/5 dark:border-white/10">
-            {groupCitations(msg.citations).map((cit, idx) => {
+            {citationGroups.map((cit, idx) => {
               const label = cit.source.split("/").pop() + citationPageLabel(cit.pages);
               const className =
                 "inline-flex items-center gap-1 rounded-lg bg-orange/10 dark:bg-orange/20 px-2.5 py-1 text-[11px] font-semibold text-orange-hover dark:text-orange border border-orange/20";

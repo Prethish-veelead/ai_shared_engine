@@ -348,34 +348,112 @@ export function ChatClient() {
           </div>
 
           {messages.length === 0 && (
-            <div className="flex h-full items-center justify-center text-center p-4">
-              <div className="bg-white/50 dark:bg-navy/30 backdrop-blur-sm p-8 rounded-3xl border border-white/20 dark:border-white/5 shadow-xl max-w-md">
-                <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-orange/10 dark:bg-orange/20 mb-4">
-                  <Bot className="h-8 w-8 text-orange" />
-                </div>
-                <h3 className="text-lg font-bold text-navy dark:text-white mb-2">How can I help you today?</h3>
-                <p className="text-sm text-gray-500 dark:text-gray-400">
-                  Send a message to start chatting with {currentBot?.name || "the assistant"}.
-                </p>
-
-                {sampleQuestions.length > 0 && (
-                  <div className="mt-6 flex flex-col gap-2 text-left">
-                    <p className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
-                      Try asking
-                    </p>
-                    {sampleQuestions.map((q) => (
-                      <button
-                        key={q}
-                        onClick={() => handleSend(q)}
-                        disabled={isTyping}
-                        className="rounded-xl border border-gray-200 dark:border-navy-deep bg-white/70 dark:bg-navy-deep/50 px-4 py-2.5 text-sm text-navy dark:text-gray-200 text-left hover:border-orange hover:bg-orange/5 dark:hover:bg-orange/10 transition-colors disabled:opacity-50"
-                      >
-                        {q}
-                      </button>
-                    ))}
+            <div className="flex h-full items-center justify-center p-4 animate-fade-in-up">
+              {chatTheme === "console" ? (
+                <div className="w-full max-w-2xl font-mono text-[13px]" style={{ color: "#d7dde5" }}>
+                  <div className="mb-6 pb-2" style={{ borderBottom: "1px solid #1c2229", color: "#4fa3d1" }}>
+                    SYSTEM READY // {currentBot?.name?.toUpperCase() || "ASSISTANT"}
                   </div>
-                )}
-              </div>
+                  <div className="mb-4 text-[#6f7a89]">
+                    &gt; connection established<br/>
+                    &gt; waiting for input...
+                  </div>
+                  {sampleQuestions.length > 0 && (
+                    <div className="flex flex-col gap-2">
+                      <div className="text-[#6f7a89] uppercase text-[10px] tracking-widest mt-4 mb-1">Suggested Queries</div>
+                      {sampleQuestions.map((q) => (
+                        <button
+                          key={q}
+                          onClick={() => handleSend(q)}
+                          disabled={isTyping}
+                          className="text-left px-3 py-2 rounded-sm transition-colors hover:bg-[#12161c]"
+                          style={{ border: "1px solid #1c2229", color: "#4fa3d1" }}
+                        >
+                          $ {q}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : chatTheme === "editorial" ? (
+                <div className="w-full max-w-2xl text-center">
+                  <h1 className="font-serif text-3xl mb-4" style={{ color: "#161b22" }}>{currentBot?.name || "The Assistant"}</h1>
+                  <div className="w-16 h-px mx-auto mb-6" style={{ background: "#3b6e71" }}></div>
+                  <p className="font-sans text-sm mb-8 max-w-md mx-auto" style={{ color: "#5c6672" }}>
+                    A refined conversational experience. Ask a question to begin reading.
+                  </p>
+                  {sampleQuestions.length > 0 && (
+                    <div className="flex flex-col gap-3 max-w-md mx-auto">
+                      <p className="font-sans text-[11px] font-bold uppercase tracking-[0.14em]" style={{ color: "#3b6e71" }}>
+                        Inquiries
+                      </p>
+                      {sampleQuestions.map((q) => (
+                        <button
+                          key={q}
+                          onClick={() => handleSend(q)}
+                          disabled={isTyping}
+                          className="text-left font-serif text-lg leading-snug hover:opacity-70 transition-opacity pb-2"
+                          style={{ borderBottom: "1px solid #d4d9de", color: "#161b22" }}
+                        >
+                          {q}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : chatTheme === "companion" ? (
+                <div className="w-full max-w-md text-center bg-white rounded-[32px] p-8 shadow-sm">
+                  <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full text-white text-2xl font-bold mb-6" style={{ background: "#e8637a" }}>
+                    {(currentBot?.name || "AI").slice(0, 2).toUpperCase()}
+                  </div>
+                  <h3 className="text-2xl font-bold mb-2" style={{ color: "#3a2a2f" }}>Hi there! 👋</h3>
+                  <p className="text-[15px] mb-8" style={{ color: "#9a8489" }}>
+                    I'm {currentBot?.name || "your AI companion"}. How can I help you today?
+                  </p>
+                  {sampleQuestions.length > 0 && (
+                    <div className="flex flex-col gap-2.5">
+                      {sampleQuestions.map((q) => (
+                        <button
+                          key={q}
+                          onClick={() => handleSend(q)}
+                          disabled={isTyping}
+                          className="text-left px-5 py-3.5 rounded-2xl transition-transform hover:scale-[1.02] active:scale-95 font-medium"
+                          style={{ background: "#fdf6f7", color: "#3a2a2f" }}
+                        >
+                          {q}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="bg-white/50 dark:bg-navy/30 backdrop-blur-sm p-8 rounded-3xl border border-white/20 dark:border-white/5 shadow-xl max-w-md text-center">
+                  <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-orange/10 dark:bg-orange/20 mb-4">
+                    <Bot className="h-8 w-8 text-orange" />
+                  </div>
+                  <h3 className="text-lg font-bold text-navy dark:text-white mb-2">How can I help you today?</h3>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    Send a message to start chatting with {currentBot?.name || "the assistant"}.
+                  </p>
+                  {sampleQuestions.length > 0 && (
+                    <div className="mt-6 flex flex-col gap-2 text-left">
+                      <p className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+                        Try asking
+                      </p>
+                      {sampleQuestions.map((q) => (
+                        <button
+                          key={q}
+                          onClick={() => handleSend(q)}
+                          disabled={isTyping}
+                          className="rounded-xl border border-gray-200 dark:border-navy-deep bg-white/70 dark:bg-navy-deep/50 px-4 py-2.5 text-sm text-navy dark:text-gray-200 text-left hover:border-orange hover:bg-orange/5 dark:hover:bg-orange/10 transition-colors disabled:opacity-50"
+                        >
+                          {q}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -424,7 +502,7 @@ export function ChatClient() {
         {/* Input Area */}
         {chatTheme === "console" ? (
           <div className="shrink-0 p-4 font-mono text-[12.5px]" style={{ background: "#0a0d12", borderTop: "1px solid #1c2229" }}>
-            <div className="mx-auto flex max-w-4xl items-end gap-2 rounded-sm px-3 py-2" style={{ border: "1px solid #1c2229" }}>
+            <div className="mx-auto flex max-w-4xl items-end gap-2 rounded-sm px-3 py-2 transition-all focus-within:ring-1 focus-within:ring-[#4fa3d1]" style={{ border: "1px solid #1c2229" }}>
               <span style={{ color: "#4fa3d1" }}>&gt;</span>
               <textarea
                 ref={textareaRef}
@@ -449,7 +527,7 @@ export function ChatClient() {
           </div>
         ) : chatTheme === "editorial" ? (
           <div className="shrink-0 p-5" style={{ background: "#eef1f4", borderTop: "1px solid #d4d9de" }}>
-            <div className="mx-auto flex max-w-3xl items-end gap-3 pb-1.5" style={{ borderBottom: "1px solid #b7bfc7" }}>
+            <div className="mx-auto flex max-w-3xl items-end gap-3 pb-1.5 transition-all focus-within:border-[#3b6e71]" style={{ borderBottom: "1px solid #b7bfc7" }}>
               <textarea
                 ref={textareaRef}
                 value={input}
@@ -473,7 +551,7 @@ export function ChatClient() {
           </div>
         ) : chatTheme === "companion" ? (
           <div className="shrink-0 p-4 sm:p-6" style={{ background: "#f7eef1", borderTop: "1px solid #f0dde2" }}>
-            <div className="mx-auto flex max-w-4xl items-end overflow-hidden rounded-3xl bg-white px-4 shadow-sm">
+            <div className="mx-auto flex max-w-4xl items-end overflow-hidden rounded-3xl bg-white px-4 shadow-sm transition-all focus-within:ring-2 focus-within:ring-[#f0dde2]">
               <textarea
                 ref={textareaRef}
                 value={input}

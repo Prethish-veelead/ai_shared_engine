@@ -1,6 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import { AnswerChart } from "@/components/chat/AnswerChart";
-import { citationPageLabel, groupCitations } from "@/lib/citations";
+import { CitationImageGallery } from "@/components/chat/CitationThumbnail";
+import { citationPageLabel, firstImageSet, groupCitations } from "@/lib/citations";
 import { cn } from "@/lib/utils";
 import { AlertCircle, Check, Copy, ExternalLink, Pencil, ThumbsDown, ThumbsUp } from "lucide-react";
 import type { MessageItemProps } from "./types";
@@ -43,7 +44,7 @@ export function EditorialMessage(props: MessageItemProps) {
 
   if (msg.role === "user") {
     return (
-      <div className="group relative w-full max-w-3xl" style={{ color: PALETTE.ink }}>
+      <div className="group relative w-full max-w-3xl animate-fade-in-up" style={{ color: PALETTE.ink }}>
         {editingMessageId === msg.id ? (
           <div className="flex flex-col gap-2 pb-5" style={{ borderBottom: `1px solid ${PALETTE.accent}55` }}>
             <textarea
@@ -101,8 +102,9 @@ export function EditorialMessage(props: MessageItemProps) {
   }
 
   const groups = msg.citations ? groupCitations(msg.citations) : [];
+  const heroImages = firstImageSet(groups);
   return (
-    <div className="w-full max-w-3xl" style={{ color: PALETTE.ink }}>
+    <div className="w-full max-w-3xl animate-fade-in-up" style={{ color: PALETTE.ink }}>
       {msg.error ? (
         <div className="flex items-center gap-2 text-rose-600">
           <AlertCircle className="h-5 w-5" />
@@ -110,6 +112,12 @@ export function EditorialMessage(props: MessageItemProps) {
         </div>
       ) : (
         <div className="max-w-[62ch] font-serif text-[17px] leading-[1.75] [&>*:last-child]:mb-0">
+          <CitationImageGallery
+            images={heroImages}
+            className="mb-4"
+            heroClassName="max-h-72 w-full rounded-sm bg-black/5 object-contain"
+            thumbClassName="h-14 w-14 shrink-0 rounded-sm object-cover"
+          />
           <ReactMarkdown components={MARKDOWN_COMPONENTS}>{msg.content}</ReactMarkdown>
         </div>
       )}

@@ -1,6 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import { AnswerChart } from "@/components/chat/AnswerChart";
-import { citationPageLabel, groupCitations } from "@/lib/citations";
+import { CitationImageGallery } from "@/components/chat/CitationThumbnail";
+import { citationPageLabel, firstImageSet, groupCitations } from "@/lib/citations";
 import { cn } from "@/lib/utils";
 import { AlertCircle, Check, Copy, ExternalLink, Pencil, ThumbsDown, ThumbsUp } from "lucide-react";
 import type { MessageItemProps } from "./types";
@@ -48,9 +49,10 @@ export function CompanionMessage(props: MessageItemProps) {
 
   const isUser = msg.role === "user";
   const groups = msg.citations ? groupCitations(msg.citations) : [];
+  const heroImages = firstImageSet(groups);
 
   return (
-    <div className={cn("group flex max-w-[85%] sm:max-w-[75%] flex-col gap-1.5", isUser ? "ml-auto items-end" : "mr-auto items-start")}>
+    <div className={cn("group flex max-w-[85%] sm:max-w-[75%] flex-col gap-1.5 animate-fade-in-up", isUser ? "ml-auto items-end" : "mr-auto items-start")}>
       <div className={cn("flex items-end gap-2", isUser && "flex-row-reverse")}>
         <div
           className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-bold"
@@ -104,6 +106,12 @@ export function CompanionMessage(props: MessageItemProps) {
             </div>
           ) : !isUser ? (
             <div className="[&>*:last-child]:mb-0">
+              <CitationImageGallery
+                images={heroImages}
+                className="mb-3"
+                heroClassName="max-h-60 w-full rounded-2xl bg-black/5 object-contain"
+                thumbClassName="h-14 w-14 shrink-0 rounded-xl object-cover"
+              />
               <ReactMarkdown components={MARKDOWN_COMPONENTS}>{msg.content}</ReactMarkdown>
             </div>
           ) : (
