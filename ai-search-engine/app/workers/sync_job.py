@@ -167,10 +167,19 @@ def _list_item_metadata(fields: dict, bot: BotConfig) -> dict:
 
 
 def run_sync(bot: BotConfig, db: Session, drive_id_for: dict[int, dict[str, str]],
-             sp: SharePointClient | None = None) -> None:
+             sp: SharePointClient | None = None,
+             extra_static_metadata: dict | None = None) -> None:
     """drive_id_for maps each site's index in bot.sharepoint.sites -> {library
     name -> Graph drive id} (resolve once, cache). sp is optional (built from
     the tenant resolver if not provided; injectable for tests).
+
+    extra_static_metadata is merged into every chunk's metadata alongside the
+    per-document category/subcategory (see _metadata) - unused by any single-
+    source bot (default None = today's exact behavior, unchanged); a
+    list+library bot's combined sync (run_combined_sync) passes
+    {"source_type": "library"} through it so citations can tell the two
+    sources of a list+library bot apart even though they now live in
+    genuinely separate collections.
     """
     sp = sp or build_sharepoint_client(bot)
     vector_store = get_vector_store()
@@ -265,7 +274,7 @@ def run_sync(bot: BotConfig, db: Session, drive_id_for: dict[int, dict[str, str]
                                 embedding_model=bot.models.embedding,
                                 chunk_size=bot.indexing.chunk_size,
                                 overlap=bot.indexing.chunk_overlap,
-                                extra_metadata=_metadata(item, bot),
+                                extra_metadata={**_metadata(item, bot), **(extra_static_metadata or {})},
                             )
                         except ValueError as exc:   # unsupported file type -> skip, don't crash
                             log.warning("Skipping %s: %s", item.name, exc)
@@ -294,7 +303,8 @@ def run_sync(bot: BotConfig, db: Session, drive_id_for: dict[int, dict[str, str]
 
 
 def run_list_sync(bot: BotConfig, db: Session, list_id_for: dict[int, dict],
-                  sp: SharePointClient | None = None) -> None:
+                  sp: SharePointClient | None = None,
+                  extra_static_metadata: dict | None = None) -> None:
     """List-mode bots re-pull every current row on every sync rather than
     tracking deltas: SharePoint Lists are typically small (tens/hundreds of
     rows, not thousands of files), so the delta-token machinery run_sync()
@@ -342,7 +352,9 @@ def run_list_sync(bot: BotConfig, db: Session, list_id_for: dict[int, dict],
                     collection=collection, bot_id=bot.id, list_id=list_id,
                     site_url=site.site_url, list_name=list_name, items=published,
                     embedding_model=bot.models.embedding,
-                    extra_metadata_for=lambda fields: _list_item_metadata(fields, bot),
+                    extra_metadata_for=lambda fields: {
+                        **_list_item_metadata(fields, bot), **(extra_static_metadata or {})
+                    },
                 )
                 log.info("Bot %s / %s: indexed %d of %d row(s)", bot.id, label, indexed, len(items))
 
@@ -402,3 +414,141 @@ def run_list_sync(bot: BotConfig, db: Session, list_id_for: dict[int, dict],
             f"{'' if total_lists == 1 else 's'} "
             f"({', '.join(failed)}); others synced normally"
         )
+
+
+# ---------------------------------------------------------------------------
+# list+library bots
+# ---------------------------------------------------------------------------
+
+def build_combined_sharepoint_client(bot: BotConfig) -> SharePointClient:
+    """Create a Graph client for a list+library bot, whose tenant sits in
+    list_plus_library.tenant (not sharepoint.tenant, which is unset for
+    this content type)."""
+    creds = resolve_tenant(bot.list_plus_library.tenant)
+    return SharePointClient(creds.tenant_id, creds.client_id, creds.client_secret)
+
+
+def _library_shim(bot: BotConfig):
+    """Duck-typed BotConfig-shaped view of a list+library bot's library side,
+    for run_sync()/resolve_drive_ids() - see run_combined_sync's docstring for
+    why a SimpleNamespace shim (not a real BotConfig) is the right tool here.
+    The ONE place this shim is built - sync_scheduler.py's full-reindex path
+    needs the exact same shape and imports this instead of hand-rolling its
+    own second copy."""
+    from types import SimpleNamespace
+
+    cfg = bot.list_plus_library
+    return SimpleNamespace(
+        id=bot.id,
+        sharepoint=SimpleNamespace(
+            tenant=cfg.tenant,
+            sites=cfg.library_sites,
+            # Library KB files use the standard publish gate (Status ==
+            # Published) - these match SharePointConfig's own defaults.
+            status_column="Status",
+            published_value="Published",
+            category_column=cfg.category_column,
+            subcategory_column=cfg.subcategory_column,
+        ),
+        vectorstore=SimpleNamespace(collection=bot.vectorstore.library_collection),
+        models=bot.models,
+        indexing=bot.indexing,
+        content_type="library",
+    )
+
+
+def _list_shim(bot: BotConfig):
+    """Duck-typed BotConfig-shaped view of a list+library bot's list side -
+    see _library_shim's docstring. structured_store=True (not False) so
+    sync_list_table() creates a real ListTable row for this bot_id, which is
+    what lets the existing structured SQL orchestrator (app/rag/structured/)
+    answer exact count/filter/lookup questions against the list side with
+    zero changes to it - build_catalog() is keyed purely on bot_id, never on
+    content_type."""
+    from types import SimpleNamespace
+
+    cfg = bot.list_plus_library
+    return SimpleNamespace(
+        id=bot.id,
+        sharepoint=SimpleNamespace(
+            tenant=cfg.tenant,
+            sites=cfg.list_sites,
+            # Solved-gate: only rows whose solved_status_column equals
+            # solved_status_value are indexed - mapped onto the same
+            # status_column/published_value attributes run_list_sync/
+            # _is_list_item_published already read, so no changes needed there.
+            # Unsolved rows never reach the vector collection OR the Postgres
+            # table, so there is nothing further to filter at query time.
+            status_column=cfg.solved_status_column,
+            published_value=cfg.solved_status_value,
+            category_column=cfg.category_column,
+            subcategory_column=cfg.subcategory_column,
+        ),
+        vectorstore=SimpleNamespace(collection=bot.vectorstore.list_collection),
+        models=bot.models,
+        structured_store=True,
+        content_type="list",
+    )
+
+
+def run_combined_sync(bot: BotConfig, db: Session,
+                      sp: SharePointClient | None = None) -> None:
+    """Sync a list+library bot: run the library (document) sync AND the list
+    (row) sync, each through their existing, battle-tested helpers, into TWO
+    separate Qdrant collections (bot.vectorstore.library_collection /
+    .list_collection) - genuinely isolated, not one shared collection tagged
+    by source, so citations/reconcile/delete_stale for one side can never
+    touch the other's points. Every chunk on each side is also tagged
+    source_type: "library"/"list" (via run_sync/run_list_sync's
+    extra_static_metadata) for citation display and defense-in-depth, even
+    though which collection a hit came from already tells you the source.
+
+    Design principle: no new ingestion logic. Both run_sync() (library) and
+    run_list_sync() (list) already do exactly what is needed independently.
+    The only challenge is that both helpers accept a BotConfig and read
+    bot.sharepoint.{sites, status_column, published_value, ...} / bot.
+    vectorstore.collection from it, but a list+library bot stores its config
+    in bot.list_plus_library / bot.vectorstore.{library,list}_collection
+    instead - see _library_shim/_list_shim for the duck-typed views that
+    bridge this. Safe because run_sync/run_list_sync only READ the config;
+    they never write back to it or pass it through Pydantic again.
+
+    Failures in each phase are independent: a library sync failure does not
+    abort the list sync and vice versa. Both errors are collected and raised
+    together at the end so the scheduler can log them all.
+    """
+    sp = sp or build_combined_sharepoint_client(bot)
+
+    library_bot = _library_shim(bot)
+    library_drive_ids = resolve_drive_ids(library_bot, sp)   # type: ignore[arg-type]
+    library_error: Exception | None = None
+    try:
+        run_sync(library_bot, db, library_drive_ids, sp=sp,   # type: ignore[arg-type]
+                extra_static_metadata={"source_type": "library"})
+        log.info("Bot %s: library sync complete", bot.id)
+    except Exception as exc:
+        library_error = exc
+        log.error("Bot %s: library sync failed: %s", bot.id, exc)
+
+    list_bot = _list_shim(bot)
+    list_id_for = resolve_list_ids(list_bot, sp)   # type: ignore[arg-type]
+    list_error: Exception | None = None
+    try:
+        run_list_sync(list_bot, db, list_id_for, sp=sp,   # type: ignore[arg-type]
+                      extra_static_metadata={"source_type": "list"})
+        log.info("Bot %s: list sync complete", bot.id)
+    except Exception as exc:
+        list_error = exc
+        log.error("Bot %s: list sync failed: %s", bot.id, exc)
+
+    errors = []
+    if library_error:
+        errors.append(f"library: {library_error}")
+    if list_error:
+        errors.append(f"list: {list_error}")
+    if errors:
+        raise UpstreamError(
+            f"Bot '{bot.id}' combined sync had failures - "
+            + "; ".join(errors)
+        )
+

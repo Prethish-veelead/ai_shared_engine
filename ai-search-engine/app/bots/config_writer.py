@@ -40,9 +40,18 @@ def update_bot(bot_id: str, cfg: BotConfig) -> BotConfig:
     # and recreating the bot goes through delete_bot(), which already cleans
     # up the old collection properly.
     existing = BotConfig(**(yaml.safe_load(path.read_text()) or {}))
-    if cfg.vectorstore.collection != existing.vectorstore.collection:
+    # list+library bots have no vectorstore.collection at all (both None) -
+    # that comparison would silently pass through a changed library_collection/
+    # list_collection undetected, so they need their own explicit check.
+    collection_changed = (
+        cfg.vectorstore.library_collection != existing.vectorstore.library_collection
+        or cfg.vectorstore.list_collection != existing.vectorstore.list_collection
+        if cfg.content_type == "list+library"
+        else cfg.vectorstore.collection != existing.vectorstore.collection
+    )
+    if collection_changed:
         raise ConfigError(
-            "Qdrant collection cannot be changed on update - it would orphan "
+            "Qdrant collection(s) cannot be changed on update - it would orphan "
             "the old collection and the bot would query an empty new one "
             "until a full resync. Delete and recreate the bot instead."
         )
@@ -91,14 +100,27 @@ def delete_bot(bot_id: str, *, vector_store=None, db=None) -> BotConfig:
     # collection name/bot_id is recorded, orphaning them permanently on any
     # failure here.
     if vector_store is not None:
-        vector_store.delete_collection(cfg.vectorstore.collection)
+        # list+library bots have TWO real collections (vectorstore.collection
+        # is None for them - see app/bots/schema.py's VectorStoreConfig) -
+        # both must be dropped, or one/both are orphaned forever on delete.
+        if cfg.content_type == "list+library":
+            vector_store.delete_collection(cfg.vectorstore.library_collection)
+            vector_store.delete_collection(cfg.vectorstore.list_collection)
+        else:
+            vector_store.delete_collection(cfg.vectorstore.collection)
 
     if db is not None:
-        from sqlalchemy import delete as sa_delete
+        from sqlalchemy import delete as sa_delete, select
         from app.db.list_tables import drop_all_list_tables
-        from app.db.models import ChatLog, EventLog, SyncState, UsageLog, WebSource
+        from app.db.models import ChatFeedbackComment, ChatLog, EventLog, SyncState, UsageLog, WebSource
         from app.db.session import get_engine
         db.execute(sa_delete(SyncState).where(SyncState.bot_id == bot_id))
+        # Must run before the ChatLog delete below - ChatFeedbackComment has
+        # no bot_id of its own, only a chat_log_id, so this bot's rows can
+        # only be found via that join while the ChatLog rows still exist.
+        db.execute(sa_delete(ChatFeedbackComment).where(
+            ChatFeedbackComment.chat_log_id.in_(select(ChatLog.id).where(ChatLog.bot_id == bot_id))
+        ))
         db.execute(sa_delete(ChatLog).where(ChatLog.bot_id == bot_id))
         db.execute(sa_delete(UsageLog).where(UsageLog.bot_id == bot_id))
         db.execute(sa_delete(EventLog).where(EventLog.bot_id == bot_id))

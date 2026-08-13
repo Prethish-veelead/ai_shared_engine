@@ -63,6 +63,7 @@ web:
   respect_robots: true                 # default true
   max_items_per_source: 25             # cap feed entries / links per source
   prefer_feeds: true
+  show_images: feeds_only              # feeds_only (default) | all | off
 vectorstore:
   collection: news_col
 indexing:
@@ -109,6 +110,43 @@ For each enabled source, `app/ingestion/web_fetcher.py`'s `fetch_source`:
    `trafilatura` (falling back to a plain `beautifulsoup4` strip of
    script/style/nav/footer if trafilatura finds nothing).
 
+### Lead images (`show_images`)
+
+If a source has a lead/thumbnail image, its **URL** (never the image itself)
+rides along as one more piece of metadata and shows up as a small thumbnail
+next to its citation in bot-ui. This app never downloads, caches, or hosts
+the image - only a URL passthrough, resolved by the viewer's own browser
+against wherever the image already lives.
+
+- **Feeds**: read from `media:thumbnail` (preferred), `media:content`, or an
+  image `<enclosure>` - the publisher's own Media RSS / Atom tags.
+- **Plain HTML pages**: read from `<meta property="og:image">`, falling back
+  to `<meta name="twitter:image">` - the same static tags most sites already
+  set for link previews. No JS/lazy-loaded `data-src` scraping.
+
+`show_images` controls which of these two origins are actually stored,
+per bot:
+
+| Value | Feed images | HTML-scraped images |
+|---|---|---|
+| `feeds_only` (default) | kept | stripped |
+| `all` | kept | kept |
+| `off` | stripped | stripped |
+
+**Feeds are preferred over HTML-scraped images for copyright reasons**: a
+feed's `media:thumbnail`/`media:content` is the publisher's own declared
+media, put there specifically to be redistributed with a summary of their
+content (that's the whole point of a syndication feed). An `og:image`
+scraped off an arbitrary HTML page has no such signal - it's just whatever
+image happens to be tagged for link-preview cards, with no assurance the
+operator has cleared it for this kind of reuse. `feeds_only` is the default
+for that reason; switching a bot to `all` is a per-bot admin decision to
+accept that lower certainty, not something enabled implicitly.
+
+This gate is enforced once, at fetch time (`fetch_source`), before a chunk
+is ever built - a bot set to `off` never stores an `image_url` at all, so
+there's nothing for bot-ui to conditionally hide later.
+
 A source that can't be fetched or is robots-disallowed raises
 `SourceSkipped` internally - `run_web_sync` catches this specifically and
 leaves that source's previously-indexed content and registry row **completely
@@ -139,7 +177,8 @@ into several chunks if needed), tagged with:
   "source": "<source_id>: <title>",
   "url": "<the article's own url>",
   "title": "...",
-  "published": "..."
+  "published": "...",
+  "image_url": "<lead image url, or null>"
 }
 ```
 
@@ -148,12 +187,13 @@ re-syncing a still-current entry overwrites its old chunks instead of
 duplicating them - the same idempotency guarantee `index_list_items` gives
 list bots.
 
-**Citations need no prompt_builder.py changes at all.** `build_context()`
+**Citations need almost no prompt_builder.py changes.** `build_context()`
 already reads `payload["source"]` and `payload["url"]` generically for
 every bot - setting those two keys at index time (`"<source_id>: <title>"`
-and the article's real URL) is the entire "citation shape" change; no
-special-casing by content type exists anywhere in the citation-building
-code.
+and the article's real URL) covers the citation shape. The one addition,
+`payload.get("image_url")`, is a plain dict read like the others - `None`
+for library/list chunks, since their indexers never write that key. No
+content-type branching exists anywhere in the citation-building code.
 
 ## Reconcile
 
@@ -214,4 +254,5 @@ No per-question or live scraping. No headless-browser/JS rendering. No
 paywall/robots bypass. No permanent raw-HTML store - only embedded chunks
 in Qdrant. No merging with library/list ingestion logic beyond reusing the
 shared chunk/embed/index/vector-store helpers every content type already
-shares.
+shares. No image is ever downloaded, cached, or re-hosted by this app -
+`image_url` is a URL passthrough only, resolved by the viewer's browser.

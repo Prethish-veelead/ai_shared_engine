@@ -14,6 +14,7 @@ from app.ingestion.web_fetcher import (
     HostRateLimiter,
     SourceSkipped,
     WebSourceRow,
+    _MAX_IMAGES_PER_DOC,
     _is_source_enabled,
     extract_article,
     fetch_source,
@@ -142,6 +143,89 @@ def test_parse_feed_caps_at_max_items():
     assert len(docs) == 1
 
 
+def test_parse_feed_no_media_leaves_image_urls_empty():
+    docs = parse_feed(_SAMPLE_RSS, max_items=25)
+    assert docs[0].image_urls == []
+
+
+# ---------- feed image extraction (media:thumbnail / media:content / enclosure) ----------
+
+_RSS_WITH_MEDIA_CONTENT = """<?xml version="1.0"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel>
+  <item>
+    <title>Article With Media</title>
+    <link>https://example.com/media-article</link>
+    <description>&lt;p&gt;Summary text for the article with media content attached.&lt;/p&gt;</description>
+    <media:content url="https://img.example.com/photo.jpg" type="image/jpeg" medium="image"/>
+  </item>
+</channel></rss>
+"""
+
+_RSS_WITH_THUMBNAIL_AND_CONTENT = """<?xml version="1.0"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel>
+  <item>
+    <title>Article With Both</title>
+    <link>https://example.com/both</link>
+    <description>&lt;p&gt;Summary text for an article exposing both media tags.&lt;/p&gt;</description>
+    <media:thumbnail url="https://img.example.com/thumb.jpg"/>
+    <media:content url="https://img.example.com/photo.jpg" type="image/jpeg" medium="image"/>
+  </item>
+</channel></rss>
+"""
+
+_RSS_WITH_IMAGE_ENCLOSURE = """<?xml version="1.0"?>
+<rss version="2.0"><channel>
+  <item>
+    <title>Article With Enclosure</title>
+    <link>https://example.com/enclosure</link>
+    <description>&lt;p&gt;Summary text for an article with an enclosure image.&lt;/p&gt;</description>
+    <enclosure url="https://img.example.com/enclosure.jpg" type="image/jpeg" length="12345"/>
+  </item>
+</channel></rss>
+"""
+
+_RSS_WITH_MANY_IMAGES = """<?xml version="1.0"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel>
+  <item>
+    <title>Article With Many Images</title>
+    <link>https://example.com/many-images</link>
+    <description>&lt;p&gt;Summary text for an article with many attached images.&lt;/p&gt;</description>
+    <media:content url="https://img.example.com/1.jpg" type="image/jpeg" medium="image"/>
+    <media:content url="https://img.example.com/2.jpg" type="image/jpeg" medium="image"/>
+    <media:content url="https://img.example.com/3.jpg" type="image/jpeg" medium="image"/>
+    <media:content url="https://img.example.com/4.jpg" type="image/jpeg" medium="image"/>
+    <media:content url="https://img.example.com/5.jpg" type="image/jpeg" medium="image"/>
+    <media:content url="https://img.example.com/6.jpg" type="image/jpeg" medium="image"/>
+    <media:content url="https://img.example.com/7.jpg" type="image/jpeg" medium="image"/>
+    <media:content url="https://img.example.com/8.jpg" type="image/jpeg" medium="image"/>
+  </item>
+</channel></rss>
+"""
+
+
+def test_parse_feed_reads_media_content_image():
+    docs = parse_feed(_RSS_WITH_MEDIA_CONTENT, max_items=25)
+    assert docs[0].image_urls == ["https://img.example.com/photo.jpg"]
+
+
+def test_parse_feed_orders_thumbnail_before_media_content():
+    # Both are collected now (not "first match wins") - thumbnail just
+    # sorts first since it's the purpose-built lead-image signal.
+    docs = parse_feed(_RSS_WITH_THUMBNAIL_AND_CONTENT, max_items=25)
+    assert docs[0].image_urls == ["https://img.example.com/thumb.jpg", "https://img.example.com/photo.jpg"]
+
+
+def test_parse_feed_reads_image_enclosure():
+    docs = parse_feed(_RSS_WITH_IMAGE_ENCLOSURE, max_items=25)
+    assert docs[0].image_urls == ["https://img.example.com/enclosure.jpg"]
+
+
+def test_parse_feed_caps_images_at_max_per_doc():
+    docs = parse_feed(_RSS_WITH_MANY_IMAGES, max_items=25)
+    assert len(docs[0].image_urls) == _MAX_IMAGES_PER_DOC == 6
+    assert docs[0].image_urls == [f"https://img.example.com/{i}.jpg" for i in range(1, 7)]
+
+
 # ---------- article extraction ----------
 
 _SAMPLE_ARTICLE_HTML = """
@@ -170,6 +254,93 @@ def test_extract_article_gets_main_text():
 def test_extract_article_returns_none_for_empty_page():
     doc = extract_article("<html><body></body></html>", "https://example.com/empty")
     assert doc is None
+
+
+def test_extract_article_no_image_meta_leaves_image_urls_empty():
+    doc = extract_article(_SAMPLE_ARTICLE_HTML, "https://example.com/audio-fix")
+    assert doc.image_urls == []
+
+
+_ARTICLE_HTML_WITH_OG_IMAGE = """
+<html><head><title>How to Fix Audio Issues</title>
+<meta property="og:image" content="https://img.example.com/og.jpg">
+</head>
+<body>
+<article>
+<h1>How to Fix Audio Issues in Microsoft Teams</h1>
+<p>Check the physical mute switch on your headset first.</p>
+<p>Then open Teams settings and select the correct audio device.</p>
+</article>
+</body></html>
+"""
+
+_ARTICLE_HTML_WITH_TWITTER_IMAGE_ONLY = """
+<html><head><title>How to Fix Audio Issues</title>
+<meta name="twitter:image" content="https://img.example.com/twitter.jpg">
+</head>
+<body>
+<article>
+<h1>How to Fix Audio Issues in Microsoft Teams</h1>
+<p>Check the physical mute switch on your headset first.</p>
+<p>Then open Teams settings and select the correct audio device.</p>
+</article>
+</body></html>
+"""
+
+
+def test_extract_article_reads_og_image():
+    doc = extract_article(_ARTICLE_HTML_WITH_OG_IMAGE, "https://example.com/audio-fix")
+    assert doc.image_urls == ["https://img.example.com/og.jpg"]
+
+
+def test_extract_article_falls_back_to_twitter_image():
+    doc = extract_article(_ARTICLE_HTML_WITH_TWITTER_IMAGE_ONLY, "https://example.com/audio-fix")
+    assert doc.image_urls == ["https://img.example.com/twitter.jpg"]
+
+
+# Realistic paragraph lengths matter here - trafilatura's content-vs-
+# boilerplate classifier needs enough surrounding text per image to
+# confidently keep it (verified live before writing this fixture; terser
+# paragraphs cause it to drop the <graphic> elements entirely).
+_ARTICLE_HTML_WITH_BODY_IMAGES = """
+<html><head><title>How to Fix Audio Issues</title></head>
+<body>
+<nav><img src="https://img.example.com/nav-logo.png"></nav>
+<article>
+<h1>How to Fix Audio Issues in Microsoft Teams</h1>
+<p>Check the physical mute switch on your headset first. This is a common cause of audio problems that many users overlook when troubleshooting their conferencing software.</p>
+<img src="https://img.example.com/step1.jpg" alt="step 1">
+<p>Then open Teams settings and select the correct audio device from the dropdown menu in the settings panel, which can be found under the general audio devices tab.</p>
+<img src="https://img.example.com/step2.jpg" alt="step 2">
+<p>Finally, restart the application and rejoin your meeting to confirm the audio issue has been resolved successfully.</p>
+</article>
+<footer><img src="https://img.example.com/ad-banner.png"></footer>
+</body></html>
+"""
+
+_ARTICLE_HTML_WITH_OG_AND_BODY_IMAGE = """
+<html><head><title>How to Fix Audio Issues</title>
+<meta property="og:image" content="https://img.example.com/og.jpg">
+</head>
+<body>
+<article>
+<h1>How to Fix Audio Issues in Microsoft Teams</h1>
+<p>Check the physical mute switch on your headset first. This is a common cause of audio problems that many users overlook when troubleshooting their conferencing software.</p>
+<img src="https://img.example.com/step1.jpg" alt="step 1">
+<p>Then open Teams settings and select the correct audio device from the dropdown menu in the settings panel, which can be found under the general audio devices tab.</p>
+</article>
+</body></html>
+"""
+
+
+def test_extract_article_reads_body_images_excluding_nav_and_footer():
+    doc = extract_article(_ARTICLE_HTML_WITH_BODY_IMAGES, "https://example.com/audio-fix")
+    assert doc.image_urls == ["https://img.example.com/step1.jpg", "https://img.example.com/step2.jpg"]
+
+
+def test_extract_article_puts_og_image_first_then_body_images():
+    doc = extract_article(_ARTICLE_HTML_WITH_OG_AND_BODY_IMAGE, "https://example.com/audio-fix")
+    assert doc.image_urls == ["https://img.example.com/og.jpg", "https://img.example.com/step1.jpg"]
 
 
 # ---------- rate limiter ----------
@@ -272,3 +443,43 @@ def test_fetch_source_raises_source_skipped_on_dead_url():
 
     with pytest.raises(SourceSkipped, match="fetch failed"):
         fetch_source(source, web, rate_limiter=_no_delay_limiter(), http_get=fake_get)
+
+
+# ---------- show_images gating (feeds_only default / all / off) ----------
+
+def _fake_get_for(content_type, body):
+    def fake_get(url, **kwargs):
+        if url.endswith("/robots.txt"):
+            return _FakeResponse("", status_code=404)
+        return _FakeResponse(body, content_type=content_type)
+    return fake_get
+
+
+@pytest.mark.parametrize("show_images,expected", [
+    ("feeds_only", ["https://img.example.com/photo.jpg"]),  # default - feed images kept
+    ("all", ["https://img.example.com/photo.jpg"]),
+    ("off", []),
+])
+def test_fetch_source_gates_feed_image_by_show_images(show_images, expected):
+    web = WebSourceConfig(tenant="t", site_url="https://x", source_list="News",
+                          respect_robots=False, prefer_feeds=True, show_images=show_images)
+    source = WebSourceRow(source_id="1", url="https://example.com/feed", enabled=True)
+
+    docs = fetch_source(source, web, rate_limiter=_no_delay_limiter(),
+                        http_get=_fake_get_for("application/rss+xml", _RSS_WITH_MEDIA_CONTENT))
+    assert docs[0].image_urls == expected
+
+
+@pytest.mark.parametrize("show_images,expected", [
+    ("feeds_only", []),  # default - HTML-scraped images NOT shown
+    ("all", ["https://img.example.com/og.jpg"]),
+    ("off", []),
+])
+def test_fetch_source_gates_html_image_by_show_images(show_images, expected):
+    web = WebSourceConfig(tenant="t", site_url="https://x", source_list="News",
+                          respect_robots=False, prefer_feeds=True, show_images=show_images)
+    source = WebSourceRow(source_id="1", url="https://example.com/audio-fix", enabled=True)
+
+    docs = fetch_source(source, web, rate_limiter=_no_delay_limiter(),
+                        http_get=_fake_get_for("text/html", _ARTICLE_HTML_WITH_OG_IMAGE))
+    assert docs[0].image_urls == expected

@@ -70,6 +70,7 @@ def _index_source(vector_store, llm, *, collection: str, bot_id: str, source: We
     them, exactly like index_list_items's per-row deterministic ids."""
     texts: list[str] = []
     metadatas: list[dict] = []
+    point_ids: list[str] = []
     for doc in docs:
         if not doc.text.strip():
             continue
@@ -83,23 +84,29 @@ def _index_source(vector_store, llm, *, collection: str, bot_id: str, source: We
             "url": doc.url,
             "title": doc.title,
             "published": doc.published,
+            # URL passthrough only - never downloaded/hosted here. Already
+            # gated by show_images at fetch time (web_fetcher.fetch_source),
+            # so this is unconditional; empty/absent for library/list bots'
+            # chunks since they never set this key at all.
+            "image_urls": doc.image_urls,
         })
         base_metadata = {
             "doc_id": doc_id, "bot_id": bot_id,
             "source_id": source.source_id, "category": source.category,
         }
-        for chunk in chunk_pages([page], chunk_size=chunk_size, overlap=overlap, base_metadata=base_metadata):
+        # chunk_idx is per-DOC, not per-source: another doc in this same
+        # source gaining/losing chunks must not shift this doc's point ids.
+        for chunk_idx, chunk in enumerate(
+            chunk_pages([page], chunk_size=chunk_size, overlap=overlap, base_metadata=base_metadata)
+        ):
             texts.append(chunk.text)
             metadatas.append(chunk.metadata)
+            point_ids.append(str(uuid.uuid5(uuid.NAMESPACE_URL, f"{bot_id}:{doc_id}:{chunk_idx}")))
 
     if not texts:
         return []
 
     vectors, _tokens = embed_texts(llm, texts, embedding_model)
-    point_ids = [
-        str(uuid.uuid5(uuid.NAMESPACE_URL, f"{bot_id}:{m['doc_id']}:{i}"))
-        for i, m in enumerate(metadatas)
-    ]
     points = [
         VectorPoint(id=pid, vector=v, payload={**m, "text": t})
         for pid, t, m, v in zip(point_ids, texts, metadatas, vectors)
@@ -181,7 +188,23 @@ def run_web_sync(bot: BotConfig, db: Session, sp: SharePointClient | None = None
     # reconcile_web_sources's docstring for why a transient fetch failure
     # must never be treated the same as a real removal).
     enabled_ids = {s.source_id for s in enabled_sources}
-    reconcile_web_sources(db, vector_store, collection, bot.id, enabled_ids)
+    if sources and not enabled_ids:
+        # 0 enabled out of N declared is far more likely a misconfigured
+        # enable_column (or a transient read problem) than an admin
+        # intentionally disabling every source at once - same reasoning as
+        # run_list_sync refusing to treat an ambiguous "0 results" as a
+        # real removal. Skip the reconcile rather than wipe the whole bot.
+        log.warning(
+            "Bot %s: %d source(s) declared but 0 enabled - skipping reconcile "
+            "to avoid wiping the whole index; previous content left as-is",
+            bot.id, len(sources),
+        )
+        _record_event_safely(
+            db, bot.id,
+            f"Web sync: {len(sources)} source(s) declared but 0 enabled - reconcile skipped",
+        )
+    else:
+        reconcile_web_sources(db, vector_store, collection, bot.id, enabled_ids)
 
     state = _get_state(db, bot.id, web.site_url, WEB_SYNC_LIBRARY)
     state.last_run_at = datetime.now(timezone.utc)

@@ -67,6 +67,14 @@ class RagPipeline:
             return answer_structured(bot, question, db=db, vector_store=self._store,
                                      llm=self._llm, top_k=self._top_k, history=trimmed_history)
 
+        # list+library: both a document library AND a SharePoint List
+        # answered together - always both sources, merged by score, never a
+        # sequential fallback. See app/rag/combined.py.
+        if bot.content_type == "list+library":
+            from app.rag.combined import answer_combined
+            return answer_combined(bot, question, db=db, vector_store=self._store,
+                                   llm=self._llm, top_k=self._top_k, history=trimmed_history)
+
         started = time.perf_counter()
 
         # Retrieval embeds ONLY the current question, never the history -

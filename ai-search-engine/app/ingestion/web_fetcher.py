@@ -24,7 +24,7 @@ with plain fixture strings - no HTTP mocking needed. Only fetch_robots_txt
 and fetch_source touch the network.
 """
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -35,6 +35,22 @@ from app.ingestion.sharepoint_client import SharePointClient
 log = get_logger(__name__)
 
 _FEED_CONTENT_TYPE_MARKERS = ("rss", "atom", "xml")
+_NON_FEED_XML_MARKERS = ("xhtml",)
+# Caps a pathological long article/feed entry from ballooning the chunk
+# payload - a gallery, not an unbounded image dump.
+_MAX_IMAGES_PER_DOC = 6
+
+
+def _dedupe_ordered(urls: list[str]) -> list[str]:
+    """Pure: first-seen order preserved, repeats dropped - shared by both
+    the feed and HTML image-extraction paths."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
 
 
 @dataclass
@@ -71,6 +87,13 @@ class ExtractedDoc:
     url: str
     text: str
     published: str | None = None
+    # Image URLs only - never downloaded or hosted by this app, just
+    # referenced where they already live. The lead/thumbnail image (feed
+    # media:thumbnail, or HTML og:image/twitter:image) is always first;
+    # any further entries are real in-body content images. Empty when none
+    # were found, or when show_images gates this source's origin out (see
+    # fetch_source, the one place that knows feed vs HTML origin).
+    image_urls: list[str] = field(default_factory=list)
 
 
 def read_web_sources(bot: BotConfig, sp: SharePointClient) -> list[WebSourceRow]:
@@ -97,12 +120,26 @@ def read_web_sources(bot: BotConfig, sp: SharePointClient) -> list[WebSourceRow]
     items = sp.list_items(site_id, list_id)
 
     rows: list[WebSourceRow] = []
+    seen_ids: set[str] = set()
     for item in items:
         fields = item.fields or {}
         url = fields.get(web.url_column)
         if not url:
             continue
         source_id = str(fields.get(web.id_column) or item.item_id)
+        if source_id in seen_ids:
+            # A collision here isn't just a display quirk: run_web_sync's
+            # per-source delete_stale is keyed on source_id, so two rows
+            # sharing one id would wipe each other's chunks. item.item_id
+            # is SharePoint's own guaranteed-unique row id, so suffixing
+            # with it disambiguates without dropping either row.
+            log.warning(
+                "Source id '%s' (row %s) collides with an earlier row in '%s' - "
+                "disambiguating with the row id so neither source's content is lost",
+                source_id, item.item_id, web.source_list,
+            )
+            source_id = f"{source_id}:{item.item_id}"
+        seen_ids.add(source_id)
         enabled = _is_source_enabled(fields, web)
         category = fields.get(web.category_column) if web.category_column else None
         rows.append(WebSourceRow(source_id=source_id, url=url, enabled=enabled, category=category))
@@ -112,8 +149,13 @@ def read_web_sources(bot: BotConfig, sp: SharePointClient) -> list[WebSourceRow]
 def _is_source_enabled(fields: dict, web: WebSourceConfig) -> bool:
     """Case/whitespace-insensitive match, same convention as the
     library/list publish gates (app/workers/sync_job.py's
-    _is_published/_is_list_item_published)."""
-    return str(fields.get(web.enable_column, "")).strip().lower() == web.enabled_value.strip().lower()
+    _is_published/_is_list_item_published). Handles SharePoint Yes/No
+    columns too: Graph returns those as a real bool, and a bare str(True)
+    would never match a configured enabled_value like "yes"."""
+    raw = fields.get(web.enable_column, "")
+    if isinstance(raw, bool):
+        return raw if web.enabled_value.strip().lower() in ("yes", "true") else not raw
+    return str(raw).strip().lower() == web.enabled_value.strip().lower()
 
 
 # ---------- robots.txt ----------
@@ -184,7 +226,9 @@ def looks_like_feed(content_type: str | None, text: str) -> bool:
     """Pure sniff: checks the HTTP Content-Type header first, falling back
     to the body's own opening tags for servers that mislabel feeds as
     text/html (common in the wild)."""
-    if content_type and any(marker in content_type.lower() for marker in _FEED_CONTENT_TYPE_MARKERS):
+    ct = content_type.lower() if content_type else ""
+    if ct and not any(marker in ct for marker in _NON_FEED_XML_MARKERS) and \
+            any(marker in ct for marker in _FEED_CONTENT_TYPE_MARKERS):
         return True
     head = text[:512].lower()
     return "<rss" in head or "<feed" in head
@@ -193,6 +237,57 @@ def looks_like_feed(content_type: str | None, text: str) -> bool:
 def _strip_html(html: str) -> str:
     from bs4 import BeautifulSoup
     return BeautifulSoup(html, "html.parser").get_text(separator="\n").strip()
+
+
+def _feed_entry_images(entry) -> list[str]:
+    """Pure: pulls every image URL off a feedparser entry - media:thumbnail
+    first (purpose-built as the entry's lead image), then every image-typed
+    media:content, then every image enclosure - the three places RSS/Atom/
+    Media RSS carry one, and a real entry can legitimately declare more
+    than one of each."""
+    urls: list[str] = []
+    for t in entry.get("media_thumbnail") or []:
+        if t.get("url"):
+            urls.append(t["url"])
+    for m in entry.get("media_content") or []:
+        if (m.get("medium") == "image" or (m.get("type") or "").startswith("image/")) and m.get("url"):
+            urls.append(m["url"])
+    for enc in entry.get("enclosures") or []:
+        if (enc.get("type") or "").startswith("image/") and enc.get("href"):
+            urls.append(enc["href"])
+    return _dedupe_ordered(urls)[:_MAX_IMAGES_PER_DOC]
+
+
+def _body_images(html: str, url: str) -> list[str]:
+    """Pure (no network): real in-body content images only - nav/ad/logo
+    clutter excluded. Reuses trafilatura's own boilerplate-removal (its
+    include_images XML output already identifies which images belong to
+    the actual article), rather than hand-rolling <img> scanning that would
+    need to reinvent that same filtering and inevitably pick up junk."""
+    import trafilatura
+    from xml.etree import ElementTree
+
+    xml_out = trafilatura.extract(html, include_images=True, output_format="xml",
+                                  include_comments=False, include_tables=False, url=url)
+    if not xml_out:
+        return []
+    try:
+        root = ElementTree.fromstring(xml_out)
+    except ElementTree.ParseError:
+        return []
+    return [g.get("src") for g in root.iter("graphic") if g.get("src")]
+
+
+def _og_image(html: str) -> str | None:
+    """Pure: reads <meta property="og:image">, falling back to
+    <meta name="twitter:image"> - the two conventional static lead-image
+    tags most sites already set for link previews. No JS/lazy-loaded
+    data-src handling - static HTML only, matching this module's scope."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    tag = soup.find("meta", attrs={"property": "og:image"}) or soup.find("meta", attrs={"name": "twitter:image"})
+    content = tag.get("content") if tag else None
+    return content or None
 
 
 def parse_feed(feed_text: str, *, max_items: int) -> list[ExtractedDoc]:
@@ -205,7 +300,7 @@ def parse_feed(feed_text: str, *, max_items: int) -> list[ExtractedDoc]:
 
     parsed = feedparser.parse(feed_text)
     docs: list[ExtractedDoc] = []
-    for entry in parsed.entries[:max_items]:
+    for idx, entry in enumerate(parsed.entries[:max_items]):
         text = ""
         if entry.get("content"):
             text = entry.content[0].get("value", "")
@@ -214,11 +309,16 @@ def parse_feed(feed_text: str, *, max_items: int) -> list[ExtractedDoc]:
         text = _strip_html(text)
         if not text.strip():
             continue
+        # entry.get("id") is the feed's own guid; link-less entries would
+        # otherwise all fall back to "" and collapse onto one doc_id
+        # downstream (source_id:url) - the index keeps them distinct.
+        url = entry.get("link") or entry.get("id") or f"#entry-{idx}"
         docs.append(ExtractedDoc(
             title=entry.get("title") or "Untitled",
-            url=entry.get("link") or "",
+            url=url,
             text=text,
             published=entry.get("published"),
+            image_urls=_feed_entry_images(entry),
         ))
     return docs
 
@@ -238,10 +338,19 @@ def extract_article(html: str, url: str) -> ExtractedDoc | None:
     text = trafilatura.extract(html, include_comments=False, include_tables=False, url=url)
     title: str | None = None
     published: str | None = None
+    primary_image: str | None = None
     metadata = trafilatura.extract_metadata(html)
     if metadata:
         title = metadata.title
         published = metadata.date
+        primary_image = getattr(metadata, "image", None)
+    primary_image = primary_image or _og_image(html)
+    # Primary (publisher-declared) image first, then real in-body content
+    # images - _body_images is a second, separate trafilatura pass since
+    # the plain-text extract() above never returns image references.
+    image_urls = _dedupe_ordered(
+        ([primary_image] if primary_image else []) + _body_images(html, url)
+    )[:_MAX_IMAGES_PER_DOC]
 
     if not text:
         from bs4 import BeautifulSoup
@@ -256,7 +365,7 @@ def extract_article(html: str, url: str) -> ExtractedDoc | None:
     if not text or not text.strip():
         return None
 
-    return ExtractedDoc(title=title or url, url=url, text=text.strip(), published=published)
+    return ExtractedDoc(title=title or url, url=url, text=text.strip(), published=published, image_urls=image_urls)
 
 
 # ---------- orchestration: fetch one source ----------
@@ -275,6 +384,7 @@ def fetch_source(source: WebSourceRow, web: WebSourceConfig, *,
     http_get = http_get or requests.get
 
     if web.respect_robots:
+        rate_limiter.wait_for(source.url)
         robots_txt = fetch_robots_txt(source.url, web.user_agent, web.request_timeout_s, http_get=http_get)
         if not is_allowed_by_robots(robots_txt, web.user_agent, source.url):
             log.warning("Source %s (%s): disallowed by robots.txt - skipped",
@@ -298,7 +408,21 @@ def fetch_source(source: WebSourceRow, web: WebSourceConfig, *,
     text = resp.text
 
     if web.prefer_feeds and looks_like_feed(content_type, text):
-        return parse_feed(text, max_items=web.max_items_per_source)
+        docs = parse_feed(text, max_items=web.max_items_per_source)
+        # show_images gating happens here, not in parse_feed/extract_article
+        # (which stay pure/unit-testable) - this is the one place that
+        # already knows which origin (feed vs HTML) produced these docs.
+        # "off" strips every image; "feeds_only" and "all" both keep a
+        # feed-origin image.
+        if web.show_images == "off":
+            docs = [replace(d, image_urls=[]) for d in docs]
+        return docs
 
     doc = extract_article(text, source.url)
+    if doc and web.show_images != "all":
+        # HTML-scraped (og:image/twitter:image/body images) are only shown
+        # under show_images="all" - "feeds_only" (default) and "off" both
+        # strip them, since HTML-origin images have less certain provenance/
+        # licensing than a feed's own publisher-set media tags.
+        doc = replace(doc, image_urls=[])
     return [doc] if doc else []

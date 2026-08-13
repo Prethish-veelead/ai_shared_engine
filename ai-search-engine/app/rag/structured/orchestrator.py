@@ -18,7 +18,7 @@ from app.rag.history import build_messages
 from app.rag.prompt_builder import build_extra_fields_instruction, parse_extra_fields_only
 from app.rag.retriever import Retriever
 from app.rag.structured.catalog import build_catalog, render_catalog_for_prompt
-from app.rag.structured.query_tools import TOOL_SPECS, ToolContext, execute_tool
+from app.rag.structured.query_tools import TOOL_SPECS, ToolContext, execute_tool, weighted_merge_retrieve
 from app.vectorstore.base import VectorStore
 
 log = get_logger(__name__)
@@ -41,7 +41,9 @@ def _dedupe_citations(citations: list[dict]) -> list[dict]:
 
 def answer_structured(bot: BotConfig, question: str, *, db: Session,
                       vector_store: VectorStore, llm: LLMClient, top_k: int = 5,
-                      history: list[dict] | None = None):
+                      history: list[dict] | None = None,
+                      secondary_collection: str | None = None,
+                      primary_weight: float = 1.0, secondary_weight: float = 1.0):
     """Returns a RagResponse (see app.rag.pipeline) - imported lazily inside
     the function body, not at module level, since pipeline.py imports this
     module lazily too (only inside answer()'s structured-routing branch);
@@ -54,7 +56,14 @@ def answer_structured(bot: BotConfig, question: str, *, db: Session,
     current question, via build_messages(). Past turns' `tool_calls`/
     `role: "tool"` messages are never replayed: `history` never contains
     anything but plain text turns to begin with, so there's nothing
-    tool-shaped to filter out here."""
+    tool-shaped to filter out here.
+
+    secondary_collection/primary_weight/secondary_weight are list+library-bot
+    only (app/rag/combined.py) - None/1.0/1.0 (the defaults) is today's exact
+    single-collection behavior for every plain list bot, unchanged. When set,
+    every semantic_search tool call (and the round-cap fallback below) also
+    retrieves from the bot's library-side collection and merges - see
+    query_tools.weighted_merge_retrieve."""
     from app.rag.pipeline import RagResponse
 
     started = time.perf_counter()
@@ -63,7 +72,9 @@ def answer_structured(bot: BotConfig, question: str, *, db: Session,
     catalog = build_catalog(bot.id, db)
     retriever = Retriever(vector_store, llm)
     ctx = ToolContext(db=db, catalog=catalog, retriever=retriever, bot=bot,
-                      row_limit=settings.structured_query_row_limit)
+                      row_limit=settings.structured_query_row_limit,
+                      secondary_collection=secondary_collection,
+                      primary_weight=primary_weight, secondary_weight=secondary_weight)
 
     system = bot.prompt.system + "\n\n" + render_catalog_for_prompt(catalog)
     messages = build_messages(system, history, question)
@@ -101,9 +112,11 @@ def answer_structured(bot: BotConfig, question: str, *, db: Session,
         )
         from app.rag.prompt_builder import build_context, build_user_message
 
-        hits, embed_tok = retriever.retrieve(
-            collection=bot.vectorstore.collection, question=question,
-            embedding_model=bot.models.embedding, top_k=top_k,
+        hits, embed_tok = weighted_merge_retrieve(
+            retriever, primary_collection=bot.vectorstore.collection,
+            secondary_collection=secondary_collection,
+            primary_weight=primary_weight, secondary_weight=secondary_weight,
+            question=question, embedding_model=bot.models.embedding, top_k=top_k,
         )
         embedding_tokens += embed_tok
         context, citations = build_context(hits)

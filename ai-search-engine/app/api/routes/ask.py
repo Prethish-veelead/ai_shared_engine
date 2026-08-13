@@ -48,6 +48,13 @@ class Citation(BaseModel):
     # no single record to link to. Frontend renders the citation as a plain
     # label when this is None.
     url: str | None = None
+    # Image URLs - web bots only (URL passthrough, never downloaded/hosted
+    # here), gated per-bot by WebSourceConfig.show_images. The lead/
+    # thumbnail image is always first, followed by real in-body content
+    # images (see app/ingestion/web_fetcher.py). Always [] for library/list
+    # citations - added field, not a schema branch, since Citation is
+    # shared across every content type.
+    image_urls: list[str] = Field(default_factory=list)
 
 
 class AskResponse(BaseModel):

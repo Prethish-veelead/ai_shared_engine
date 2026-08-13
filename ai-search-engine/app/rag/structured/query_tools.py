@@ -40,6 +40,15 @@ class ToolContext:
     retriever: Retriever
     bot: BotConfig
     row_limit: int = DEFAULT_ROW_LIMIT
+    # list+library bots only (app/rag/combined.py) - when set, semantic_search
+    # ALSO retrieves from this second collection (the bot's library side,
+    # ctx.bot.vectorstore.collection being the list side in that case),
+    # weights each side's scores, merges, and de-dupes before returning.
+    # None (the default) is today's exact single-collection behavior for
+    # every existing list bot, unchanged.
+    secondary_collection: str | None = None
+    primary_weight: float = 1.0
+    secondary_weight: float = 1.0
 
 
 def _resolve_list(catalog: BotCatalog, list_name: Any) -> ListCatalogEntry:
@@ -216,14 +225,57 @@ def distinct_values(ctx: ToolContext, list: str, column: str, limit: int = 100) 
     return {"values": values, "citations": [_list_citation(entry)]}
 
 
+def weighted_merge_retrieve(retriever: Retriever, *, primary_collection: str,
+                            secondary_collection: str | None, primary_weight: float,
+                            secondary_weight: float, question: str, embedding_model: str,
+                            top_k: int) -> tuple[list, int]:
+    """Shared by semantic_search (below) and orchestrator.py's tool-round-cap
+    fallback - retrieves from one collection (secondary_collection=None,
+    every plain list bot's exact existing behavior) or two (a list+library
+    bot: both ALWAYS queried, never a sequential fallback), weights each
+    side's raw scores, merges, de-dupes by doc_id keeping the higher-weighted
+    occurrence, and returns the top_k of the combined set plus total embedding
+    tokens spent across both retrieve() calls."""
+    hits, total_tokens = retriever.retrieve(
+        collection=primary_collection, question=question,
+        embedding_model=embedding_model, top_k=top_k,
+    )
+    if not secondary_collection:
+        return hits, total_tokens
+
+    secondary_hits, secondary_tokens = retriever.retrieve(
+        collection=secondary_collection, question=question,
+        embedding_model=embedding_model, top_k=top_k,
+    )
+    total_tokens += secondary_tokens
+    weighted = [(h, primary_weight) for h in hits] + [(h, secondary_weight) for h in secondary_hits]
+
+    best_by_doc: dict[str, tuple[Any, float]] = {}
+    for hit, weight in weighted:
+        doc_id = hit.payload.get("doc_id") or hit.id
+        score = hit.score * weight
+        if doc_id not in best_by_doc or score > best_by_doc[doc_id][1]:
+            best_by_doc[doc_id] = (hit, score)
+    merged = [hit for hit, _ in sorted(best_by_doc.values(), key=lambda pair: pair[1], reverse=True)[:top_k]]
+    return merged, total_tokens
+
+
 def semantic_search(ctx: ToolContext, query: str, top_k: int = 5) -> dict:
-    """Unchanged existing vector path, exposed as just one more tool - this is
-    how genuinely descriptive/fuzzy questions still get served, and how
-    routing between 'structured' and 'semantic' falls out naturally from the
-    model's own tool choice rather than a hand-written classifier."""
-    hits, embed_tokens = ctx.retriever.retrieve(
-        collection=ctx.bot.vectorstore.collection, question=query,
-        embedding_model=ctx.bot.models.embedding, top_k=top_k,
+    """The existing vector path, exposed as just one more tool - this is how
+    genuinely descriptive/fuzzy questions still get served, and how routing
+    between 'structured' and 'semantic' falls out naturally from the model's
+    own tool choice rather than a hand-written classifier.
+
+    For a plain list bot (ctx.secondary_collection is None) this is exactly
+    today's single-collection behavior, unchanged. For a list+library bot
+    (app/rag/combined.py sets secondary_collection to the library side's
+    collection), this ALSO retrieves from that second collection - see
+    weighted_merge_retrieve for the merge/weight/de-dupe logic."""
+    hits, total_tokens = weighted_merge_retrieve(
+        ctx.retriever, primary_collection=ctx.bot.vectorstore.collection,
+        secondary_collection=ctx.secondary_collection,
+        primary_weight=ctx.primary_weight, secondary_weight=ctx.secondary_weight,
+        question=query, embedding_model=ctx.bot.models.embedding, top_k=top_k,
     )
     results = [{"source": h.payload.get("source", "unknown"), "text": h.payload.get("text", ""),
                "score": h.score} for h in hits]
@@ -231,14 +283,15 @@ def semantic_search(ctx: ToolContext, query: str, top_k: int = 5) -> dict:
     # hit came from) - looked up by the hit's list_id payload field since,
     # unlike the SQL tools above, semantic_search never resolves a
     # ListCatalogEntry through _resolve_list(). Falls back to the raw
-    # per-hit source/url if a hit's list_id isn't in the catalog (shouldn't
-    # normally happen - every indexed row's list is always in list_tables).
+    # per-hit source/url if a hit's list_id isn't in the catalog - the
+    # expected path for every library-origin hit (library chunks never carry
+    # list_id), and previously only a theoretical fallback for pure list bots.
     citations = []
     for h in hits:
         entry = ctx.catalog.by_list_id.get(h.payload.get("list_id"))
         citations.append(_list_citation(entry) if entry else
                          {"source": h.payload.get("source", "unknown"), "url": h.payload.get("url")})
-    return {"results": results, "citations": citations, "embedding_tokens": embed_tokens}
+    return {"results": results, "citations": citations, "embedding_tokens": total_tokens}
 
 
 TOOL_SPECS: list[dict] = [

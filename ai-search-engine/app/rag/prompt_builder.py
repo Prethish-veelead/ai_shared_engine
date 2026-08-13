@@ -20,7 +20,10 @@ def build_context(hits: list[SearchHit]) -> tuple[str, list[dict]]:
         blocks.append(f"[{i}] {label}\n{text}")
         citations.append({"index": i, "source": source, "page": page,
                           "doc_id": hit.payload.get("doc_id"), "score": hit.score,
-                          "url": hit.payload.get("url")})
+                          "url": hit.payload.get("url"),
+                          # Empty for library/list chunks - they never write
+                          # this payload key. web bots only, URL passthrough.
+                          "image_urls": hit.payload.get("image_urls") or []})
     return "\n\n".join(blocks), citations
 
 

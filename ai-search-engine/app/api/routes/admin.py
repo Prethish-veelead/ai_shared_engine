@@ -49,15 +49,48 @@ def list_bots() -> list[dict]:
     return [{
         "id": b.id, "name": b.name, "route": b.route, "enabled": b.enabled,
         "contentType": b.content_type,
-        # sharepoint is null for content_type=web bots (they use `web`
-        # instead - see app/bots/schema.py's _valid_content_source).
+        # tenant + the SharePoint column-gate fields have no form UI of
+        # their own yet, but MUST round-trip through edit -> save or every
+        # save silently resets them to schema defaults (see toBotConfigPayload
+        # in the admin-portal, which now preserves whatever it's handed here).
+        "tenant": (
+            b.sharepoint.tenant if b.sharepoint
+            else b.web.tenant if b.web
+            else b.list_plus_library.tenant if b.list_plus_library
+            else None
+        ),
+        # sharepoint is null for content_type=web/list+library bots (they use
+        # `web`/`list_plus_library` instead - see app/bots/schema.py's
+        # _valid_content_source).
         "sharepointSites": [{"siteUrl": s.site_url, "libraries": s.libraries, "lists": s.lists} for s in b.sharepoint.sites] if b.sharepoint else [],
+        "sharepointStatusColumn": b.sharepoint.status_column if b.sharepoint else None,
+        "sharepointPublishedValue": b.sharepoint.published_value if b.sharepoint else None,
+        "sharepointCategoryColumn": b.sharepoint.category_column if b.sharepoint else None,
+        "sharepointSubcategoryColumn": b.sharepoint.subcategory_column if b.sharepoint else None,
         "webSource": ({
             "siteUrl": b.web.site_url, "sourceList": b.web.source_list,
             "idColumn": b.web.id_column, "urlColumn": b.web.url_column,
             "enableColumn": b.web.enable_column, "enabledValue": b.web.enabled_value,
             "categoryColumn": b.web.category_column or "",
+            "showImages": b.web.show_images,
         } if b.web else None),
+        # list+library bots only - round-trips the whole config block so an
+        # edit -> save doesn't silently reset any of it (the same bug class
+        # this function's docstring already fixed for sharepoint/web).
+        "listPlusLibrary": ({
+            "librarySites": [{"siteUrl": s.site_url, "libraries": s.libraries, "lists": s.lists} for s in b.list_plus_library.library_sites],
+            "listSites": [{"siteUrl": s.site_url, "libraries": s.libraries, "lists": s.lists} for s in b.list_plus_library.list_sites],
+            "solvedStatusColumn": b.list_plus_library.solved_status_column,
+            "solvedStatusValue": b.list_plus_library.solved_status_value,
+            "categoryColumn": b.list_plus_library.category_column,
+            "subcategoryColumn": b.list_plus_library.subcategory_column,
+            "sourceWeights": {
+                "library": b.list_plus_library.source_weights.library,
+                "list": b.list_plus_library.source_weights.list,
+            },
+            "libraryCollection": b.vectorstore.library_collection,
+            "listCollection": b.vectorstore.list_collection,
+        } if b.list_plus_library else None),
         "qdrantCollection": b.vectorstore.collection,
         "llmModel": b.models.llm,
         "embeddingModel": b.models.embedding,
@@ -87,7 +120,6 @@ def index_status(bot_id: str | None = None, db: Session = Depends(get_session)) 
 
     result = []
     for bot in bots:
-        stats = store.index_stats(bot.vectorstore.collection)
         # Filtered to the bot's CURRENT (site_url, library/list) set - a
         # renamed or removed library leaves its old SyncState row behind
         # (config_writer.update_bot only purges rows on delete_bot, not on a
@@ -98,14 +130,43 @@ def index_status(bot_id: str | None = None, db: Session = Depends(get_session)) 
         # content_type=web bots have no per-library/list breakdown - the
         # whole bot's sync is one SyncState row, keyed with a sentinel
         # "library" name (app/workers/web_sync.py's WEB_SYNC_LIBRARY).
+        # content_type=list+library bots have no `bot.sharepoint` at all (its
+        # two site groups live under bot.list_plus_library instead) and write
+        # to TWO collections, so both need their own branch here.
         if bot.content_type == "web":
+            stats = store.index_stats(bot.vectorstore.collection)
             current_keys = {(bot.web.site_url, WEB_SYNC_LIBRARY)}
+            total_libraries = 1
+        elif bot.content_type == "list+library":
+            cfg = bot.list_plus_library
+            lib_stats = store.index_stats(bot.vectorstore.library_collection)
+            list_stats = store.index_stats(bot.vectorstore.list_collection)
+            stats = {
+                "documents": lib_stats["documents"] + list_stats["documents"],
+                "chunks": lib_stats["chunks"] + list_stats["chunks"],
+            }
+            current_keys = {
+                (site.site_url, name) for site in cfg.library_sites for name in site.libraries
+            } | {
+                (site.site_url, name) for site in cfg.list_sites for name in site.lists
+            }
+            total_libraries = (
+                sum(len(site.libraries) for site in cfg.library_sites)
+                + sum(len(site.lists) for site in cfg.list_sites)
+            )
         else:
+            stats = store.index_stats(bot.vectorstore.collection)
             current_keys = {
                 (site.site_url, name)
                 for site in (bot.sharepoint.sites if bot.sharepoint else [])
                 for name in (*site.libraries, *site.lists)
             }
+            # A bot only ever populates one of libraries/lists (see BotConfig.
+            # content_type), so summing both here just counts "sync units"
+            # generically without needing to branch on library vs list.
+            total_libraries = sum(
+                len(site.libraries) + len(site.lists) for site in (bot.sharepoint.sites if bot.sharepoint else [])
+            )
         states = [s for s in states_by_bot.get(bot.id, []) if (s.site_url, s.library) in current_keys]
         # MIN across libraries, not MAX, and only once every configured
         # library has a row with a real last_run_at - a bot with N libraries
@@ -119,14 +180,6 @@ def index_status(bot_id: str | None = None, db: Session = Depends(get_session)) 
         # the background. MIN only advances once the slowest/last library
         # is also done, and doubles as a more honest "how stale is this bot"
         # value in general (a bot is only as fresh as its stalest library).
-        # A bot only ever populates one of libraries/lists (see BotConfig.
-        # content_type), so summing both here just counts "sync units"
-        # generically without needing to branch on content_type - except
-        # web, which has no libraries/lists at all and is always exactly
-        # one sync unit (see current_keys above).
-        total_libraries = 1 if bot.content_type == "web" else sum(
-            len(site.libraries) + len(site.lists) for site in (bot.sharepoint.sites if bot.sharepoint else [])
-        )
         all_libraries_synced = bool(states) and len(states) >= total_libraries \
             and all(s.last_run_at is not None for s in states)
         last_run = min((s.last_run_at for s in states), default=None) if all_libraries_synced else None
@@ -244,6 +297,111 @@ def sharepoint_lists(site_url: str, tenant: str = "veelead-development") -> list
     except Exception as exc:
         raise UpstreamError(f"Failed to resolve SharePoint site/lists: {exc}") from exc
     return sorted(lists.keys())
+
+
+@router.get("/sharepoint/list-columns")
+def sharepoint_list_columns(site_url: str, list_name: str,
+                             tenant: str = "veelead-development") -> list[str]:
+    """Return the non-system column names for a specific SharePoint List.
+    Used by the list+library bot form to let the admin pin a 'solved_status_column'
+    without having to know the internal Graph field name in advance.
+
+    Implementation: fetches up to 20 real rows, unions all field keys across
+    them, subtracts the known system fields (app/ingestion/indexer.LIST_SYSTEM_FIELDS)
+    that are present on every list regardless of its schema, and returns the
+    remainder sorted. No Graph /columns endpoint needed - real rows always
+    expose the real columns, and this approach surfaces internal field names
+    (e.g. 'TicketStatus', not 'Status') exactly as they appear in the data,
+    which is what the gate comparison uses.
+
+    Called from the admin portal's 'Load Columns' button in the solved-gate
+    section of the list+library bot creation form."""
+    from app.ingestion.indexer import LIST_SYSTEM_FIELDS
+    from app.ingestion.sharepoint_client import SharePointClient
+    from app.ingestion.tenant_resolver import resolve_tenant
+
+    creds = resolve_tenant(tenant)
+    client = SharePointClient(creds.tenant_id, creds.client_id, creds.client_secret)
+    try:
+        site_id = client.resolve_site(site_url)
+        all_lists = client.resolve_lists(site_id)
+        if list_name not in all_lists:
+            raise UpstreamError(
+                f"List '{list_name}' not found on site '{site_url}'. "
+                f"Available: {sorted(all_lists)}"
+            )
+        list_id = all_lists[list_name]
+        # Fetch a sample of rows to discover columns. 20 rows is enough to
+        # catch optional columns that don't appear on every row (e.g. a
+        # 'Resolution' column only filled in when a ticket is closed). Full
+        # list_items() would work too but is unnecessarily heavy for large lists.
+        items = client.list_items(site_id, list_id)
+        sample = items[:20] if len(items) > 20 else items
+    except UpstreamError:
+        raise
+    except Exception as exc:
+        raise UpstreamError(f"Failed to fetch columns for list '{list_name}': {exc}") from exc
+
+    seen: set[str] = set()
+    for item in sample:
+        seen.update(item.fields.keys())
+
+    # Strip system/plumbing fields and '@odata.*' metadata keys - these are
+    # present on every Graph list item regardless of schema and are not real
+    # business columns an admin would want to filter on.
+    extra_system = {"id", "Title", "Modified", "Created", "Author", "Editor"}
+    columns = sorted(
+        col for col in seen
+        if col not in LIST_SYSTEM_FIELDS
+        and col not in extra_system
+        and not col.startswith("@")
+    )
+    return columns
+
+
+@router.get("/sharepoint/list-column-values")
+def sharepoint_list_column_values(site_url: str, list_name: str, column: str,
+                                   tenant: str = "veelead-development") -> list[str]:
+    """Return the distinct non-null string values for one column in a SharePoint
+    List, capped at 200. Used by the list+library bot form's 'Load Values' button
+    so the admin can pick the exact 'solved_status_value' (e.g. 'Solved',
+    'Closed', 'Resolved') from a dropdown rather than guessing.
+
+    Fetches all rows (list_items does paged Graph requests already), collects
+    unique values for the requested column, sorts and caps them. String-coerces
+    all values so numeric/boolean columns still produce useful dropdown entries."""
+    from app.ingestion.sharepoint_client import SharePointClient
+    from app.ingestion.tenant_resolver import resolve_tenant
+
+    creds = resolve_tenant(tenant)
+    client = SharePointClient(creds.tenant_id, creds.client_id, creds.client_secret)
+    try:
+        site_id = client.resolve_site(site_url)
+        all_lists = client.resolve_lists(site_id)
+        if list_name not in all_lists:
+            raise UpstreamError(
+                f"List '{list_name}' not found on site '{site_url}'. "
+                f"Available: {sorted(all_lists)}"
+            )
+        list_id = all_lists[list_name]
+        items = client.list_items(site_id, list_id)
+    except UpstreamError:
+        raise
+    except Exception as exc:
+        raise UpstreamError(
+            f"Failed to fetch values for column '{column}' in list '{list_name}': {exc}"
+        ) from exc
+
+    _MAX_VALUES = 200
+    seen: set[str] = set()
+    for item in items:
+        raw = item.fields.get(column)
+        if raw is None or raw == "":
+            continue
+        seen.add(str(raw).strip())
+        if len(seen) >= _MAX_VALUES:
+            break
+    return sorted(seen)
 
 
 @router.post("/bots")

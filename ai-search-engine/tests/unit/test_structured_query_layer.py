@@ -165,6 +165,16 @@ def test_execute_tool_unknown_list_returns_error_not_raises():
     assert "error" in result
 
 
+# ---- ToolContext's list+library fields default to today's exact behavior ----
+
+def test_tool_context_secondary_collection_defaults_to_none():
+    from app.rag.structured.query_tools import ToolContext
+    ctx = ToolContext(db=_FakeSession(), catalog=_catalog(), retriever=None, bot=None)
+    assert ctx.secondary_collection is None
+    assert ctx.primary_weight == 1.0
+    assert ctx.secondary_weight == 1.0
+
+
 # ---- tool specs shape ----
 
 def test_tool_specs_are_well_formed_function_schemas():

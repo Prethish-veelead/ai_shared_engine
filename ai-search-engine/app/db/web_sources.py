@@ -8,6 +8,7 @@ used.
 from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
@@ -21,6 +22,12 @@ def upsert_web_source(db: Session, *, bot_id: str, source_id: str, url: str,
     """Records (or refreshes) that `source_id` is currently indexed for
     this bot - called once per source, right after its chunks are
     successfully written to Qdrant."""
+    # A SharePoint multi-choice/number column comes back as a list/float,
+    # not a str - coerce here rather than let an un-castable value reach
+    # the DB and raise mid-sync.
+    if category is not None and not isinstance(category, str):
+        category = str(category)
+
     row = db.execute(
         select(WebSource).where(WebSource.bot_id == bot_id, WebSource.source_id == source_id)
     ).scalar_one_or_none()
@@ -31,7 +38,17 @@ def upsert_web_source(db: Session, *, bot_id: str, source_id: str, url: str,
         row.url = url
         row.category = category
     row.last_synced_at = datetime.now(timezone.utc)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Lost a race to a concurrent sync run inserting the same
+        # (bot_id, source_id) row first (manual "Sync Now" + the cron
+        # scheduler) - same recovery as sync_job._get_state: roll back so
+        # the session isn't left poisoned for the rest of this sync, the
+        # other transaction's row already has this source recorded.
+        db.rollback()
+        log.warning("Bot %s / source %s: lost race inserting WebSource row - already recorded elsewhere",
+                    bot_id, source_id)
 
 
 def reconcile_web_sources(db: Session, vector_store, collection: str, bot_id: str,

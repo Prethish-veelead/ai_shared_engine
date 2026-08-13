@@ -12,10 +12,13 @@ from app.db.repositories.log_repository import record_event
 from app.db.session import _session_factory
 from app.monitoring.alerts import check_resource_thresholds
 from app.workers.sync_job import (
+    _library_shim,
+    build_combined_sharepoint_client,
     build_sharepoint_client,
     reset_delta_tokens,
     resolve_drive_ids,
     resolve_list_ids,
+    run_combined_sync,
     run_list_sync,
     run_sync,
 )
@@ -50,9 +53,27 @@ def sync_one_bot(bot_id: str, full: bool = False) -> None:
         bot = registry.get_any(bot_id)   # allow disabled bots: their content can still be kept synced
         # web bots read their tenant from bot.web, not bot.sharepoint (which
         # they never set - see app/bots/schema.py's _valid_content_source).
-        sp = build_web_sharepoint_client(bot) if bot.content_type == "web" else build_sharepoint_client(bot)
+        # list+library bots read tenant from bot.list_plus_library.
+        if bot.content_type == "list+library":
+            sp = build_combined_sharepoint_client(bot)
+        elif bot.content_type == "web":
+            sp = build_web_sharepoint_client(bot)
+        else:
+            sp = build_sharepoint_client(bot)
         with _session_factory()() as db:
-            if bot.content_type == "list":
+            if bot.content_type == "list+library":
+                # list+library always does a full re-pull for the list side
+                # (same as pure list bots) and delta for the library side.
+                # The "full" flag is honoured on the library side only: if
+                # full=True we reset delta tokens BEFORE calling run_combined_sync,
+                # which passes them to run_sync internally.
+                if full:
+                    # Reset only the library side's delta tokens - the same
+                    # shim run_combined_sync itself uses, not a second
+                    # hand-rolled copy (see sync_job._library_shim).
+                    reset_delta_tokens(db, _library_shim(bot))   # type: ignore[arg-type]
+                run_combined_sync(bot, db, sp=sp)
+            elif bot.content_type == "list":
                 # List bots always do a full re-pull (see run_list_sync) - the
                 # "full" flag only matters for library bots' delta tokens.
                 list_id_for = resolve_list_ids(bot, sp)
