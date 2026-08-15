@@ -37,6 +37,19 @@ interface SiteBlock {
   selectedLists: string[];
   loadingLists: boolean;
   listError: string;
+  // Library-file Publish Gate - PER SITE (this block), not per-bot, since
+  // two library sites commonly use two different status schemas (see
+  // app/bots/schema.py's SharePointSite docstring). Meaningful only when
+  // this block is a library site; unused/ignored for a list site.
+  requirePublishGate: boolean;
+  statusColumn: string;
+  publishedValue: string;
+  gateColumnOptions: string[];
+  gateLoadingColumns: boolean;
+  gateColumnError: string;
+  gateValueOptions: string[];
+  gateLoadingValues: boolean;
+  gateValueError: string;
 }
 
 function newSiteBlock(): SiteBlock {
@@ -52,6 +65,15 @@ function newSiteBlock(): SiteBlock {
     selectedLists: [],
     loadingLists: false,
     listError: "",
+    requirePublishGate: true,
+    statusColumn: "Status",
+    publishedValue: "Published",
+    gateColumnOptions: [],
+    gateLoadingColumns: false,
+    gateColumnError: "",
+    gateValueOptions: [],
+    gateLoadingValues: false,
+    gateValueError: "",
   };
 }
 
@@ -208,6 +230,149 @@ function toggleOptionIn(kind: "library" | "list", setter: React.Dispatch<React.S
   }));
 }
 
+// Publish Gate column/value discovery for one site block - samples from the
+// FIRST library currently checked on that block (the gate is per-site, so
+// any one of that site's checked libraries has the real schema to sample).
+async function loadGateColumnsIn(blocks: SiteBlock[], setter: React.Dispatch<React.SetStateAction<SiteBlock[]>>, key: string) {
+  const block = blocks.find((b) => b.key === key);
+  if (!block) return;
+  const siteUrl = block.loadedSiteUrl || block.siteUrlInput.trim();
+  const libraryName = block.selectedLibraries[0];
+  if (!siteUrl || !libraryName) {
+    updateBlockIn(setter, key, { gateColumnError: "Select a library above first." });
+    return;
+  }
+  updateBlockIn(setter, key, { gateLoadingColumns: true, gateColumnError: "" });
+  try {
+    const columns = await api.getSharePointLibraryColumns(siteUrl, libraryName);
+    updateBlockIn(setter, key, { gateColumnOptions: columns, gateLoadingColumns: false });
+  } catch (error: any) {
+    updateBlockIn(setter, key, { gateColumnError: error?.message || "Failed to load columns for that library.", gateLoadingColumns: false });
+  }
+}
+
+async function loadGateValuesIn(blocks: SiteBlock[], setter: React.Dispatch<React.SetStateAction<SiteBlock[]>>, key: string) {
+  const block = blocks.find((b) => b.key === key);
+  if (!block) return;
+  const siteUrl = block.loadedSiteUrl || block.siteUrlInput.trim();
+  const libraryName = block.selectedLibraries[0];
+  if (!siteUrl || !libraryName || !block.statusColumn) {
+    updateBlockIn(setter, key, { gateValueError: "Pick a status column above first." });
+    return;
+  }
+  updateBlockIn(setter, key, { gateLoadingValues: true, gateValueError: "" });
+  try {
+    const values = await api.getSharePointLibraryColumnValues(siteUrl, libraryName, block.statusColumn);
+    updateBlockIn(setter, key, { gateValueOptions: values, gateLoadingValues: false });
+  } catch (error: any) {
+    updateBlockIn(setter, key, { gateValueError: error?.message || "Failed to load values for that column.", gateLoadingValues: false });
+  }
+}
+
+// Publish Gate radio + column/value picker for one site block - shared by
+// CombinedSiteBlockEditor (list+library's library sites) and the plain
+// library-bot form's own site blocks below, so the fairly long JSX isn't
+// duplicated between them.
+function PublishGateFields({
+  block, onUpdate, onLoadColumns, onLoadValues,
+}: {
+  block: SiteBlock;
+  onUpdate: (patch: Partial<SiteBlock>) => void;
+  onLoadColumns: () => void;
+  onLoadValues: () => void;
+}) {
+  return (
+    <div className="rounded-md border border-gray-300 dark:border-navy-deep p-3 space-y-3">
+      <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Publish Gate (this site)</label>
+      <div className="space-y-1.5">
+        <label className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+          <input
+            type="radio" className="mt-0.5 border-gray-300 dark:border-navy-deep"
+            checked={block.requirePublishGate}
+            onChange={() => onUpdate({ requirePublishGate: true })}
+          />
+          <span><strong>Require a status column</strong> (default) - only files on this site where this column equals this value are indexed.</span>
+        </label>
+        <label className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+          <input
+            type="radio" className="mt-0.5 border-gray-300 dark:border-navy-deep"
+            checked={!block.requirePublishGate}
+            onChange={() => onUpdate({ requirePublishGate: false })}
+          />
+          <span><strong>No gate</strong> - index every file on this site, regardless of any status column.</span>
+        </label>
+      </div>
+      {block.requirePublishGate && (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div>
+            <div className="flex items-center justify-between">
+              <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">Status column</label>
+              <button
+                type="button"
+                onClick={onLoadColumns}
+                disabled={block.gateLoadingColumns || block.selectedLibraries.length === 0}
+                className="text-xs font-medium text-orange hover:text-orange-hover disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {block.gateLoadingColumns ? "Loading..." : "Load Columns"}
+              </button>
+            </div>
+            {block.selectedLibraries.length === 0 && (
+              <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Select a library above first.</p>
+            )}
+            {block.gateColumnError && <p className="text-xs text-red-600 dark:text-red-400">{block.gateColumnError}</p>}
+            {block.gateColumnOptions.length === 0 ? (
+              <input
+                value={block.statusColumn}
+                onChange={(e) => onUpdate({ statusColumn: e.target.value })}
+                className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none"
+                placeholder="Status"
+              />
+            ) : (
+              <select
+                value={block.statusColumn}
+                onChange={(e) => onUpdate({ statusColumn: e.target.value })}
+                className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none"
+              >
+                {block.gateColumnOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            )}
+          </div>
+          <div>
+            <div className="flex items-center justify-between">
+              <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">Published value</label>
+              <button
+                type="button"
+                onClick={onLoadValues}
+                disabled={block.gateLoadingValues || block.selectedLibraries.length === 0 || !block.statusColumn}
+                className="text-xs font-medium text-orange hover:text-orange-hover disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {block.gateLoadingValues ? "Loading..." : "Load Values"}
+              </button>
+            </div>
+            {block.gateValueError && <p className="text-xs text-red-600 dark:text-red-400">{block.gateValueError}</p>}
+            {block.gateValueOptions.length === 0 ? (
+              <input
+                value={block.publishedValue}
+                onChange={(e) => onUpdate({ publishedValue: e.target.value })}
+                className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none"
+                placeholder="Published"
+              />
+            ) : (
+              <select
+                value={block.publishedValue}
+                onChange={(e) => onUpdate({ publishedValue: e.target.value })}
+                className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none"
+              >
+                {block.gateValueOptions.map((v) => <option key={v} value={v}>{v}</option>)}
+              </select>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Shared JSX for a repeatable SharePoint site picker (library OR list mode) -
 // used twice by the list+library form section below (once for library sites,
 // once for list sites), same visual shape as the single-array picker further
@@ -215,6 +380,7 @@ function toggleOptionIn(kind: "library" | "list", setter: React.Dispatch<React.S
 function CombinedSiteBlockEditor({
   blocks, kind, label, placeholder,
   onAdd, onRemove, onUpdate, onLoad, onToggle,
+  onLoadGateColumns, onLoadGateValues,
 }: {
   blocks: SiteBlock[];
   kind: "library" | "list";
@@ -225,6 +391,11 @@ function CombinedSiteBlockEditor({
   onUpdate: (key: string, patch: Partial<SiteBlock>) => void;
   onLoad: (key: string) => void;
   onToggle: (key: string, value: string) => void;
+  // Publish Gate discovery - library sites only (kind === "library"); list
+  // sites keep their own separate Solved Gate mechanism instead, so these
+  // are optional and simply never called for kind === "list".
+  onLoadGateColumns?: (key: string) => void;
+  onLoadGateValues?: (key: string) => void;
 }) {
   const loadLabel = kind === "library" ? "Load Libraries" : "Load Lists";
   const emptyLabel = kind === "library" ? "document libraries" : "SharePoint Lists";
@@ -287,6 +458,14 @@ function CombinedSiteBlockEditor({
                 ))}
               </div>
             )}
+            {kind === "library" && (
+              <PublishGateFields
+                block={block}
+                onUpdate={(patch) => onUpdate(block.key, patch)}
+                onLoadColumns={() => onLoadGateColumns?.(block.key)}
+                onLoadValues={() => onLoadGateValues?.(block.key)}
+              />
+            )}
           </div>
         );
       })}
@@ -309,7 +488,7 @@ export default function BotsPage() {
   const [includeCategory, setIncludeCategory] = useState(false);
   const [sampleQuestionBlocks, setSampleQuestionBlocks] = useState<SampleQuestionBlock[]>([]);
   const [showJsonPreview, setShowJsonPreview] = useState(false);
-  const [contentType, setContentType] = useState<"library" | "list" | "web" | "list+library">("library");
+  const [contentType, setContentType] = useState<"library" | "list" | "web" | "list+library" | "chat">("library");
   const [webSource, setWebSource] = useState<WebSourceFormState>(newWebSourceState());
   // content_type=list+library bots only - see ai-search-engine/docs/
   // LIST_PLUS_LIBRARY_BOT.md. Two independent SiteBlock arrays (library
@@ -330,6 +509,7 @@ export default function BotsPage() {
   const [solvedStatusValue, setSolvedStatusValue] = useState("Solved");
   const [sourceWeightLibrary, setSourceWeightLibrary] = useState(1);
   const [sourceWeightList, setSourceWeightList] = useState(1);
+  const [retrievalMode, setRetrievalMode] = useState<"merge" | "sequential">("merge");
   // TEMPORARY - dev/production tenant toggle, for testing only. Remove this
   // state + the switch that renders it (below, near "Create Bot") once
   // testing against the dev tenant is no longer needed - see api.ts's
@@ -395,6 +575,13 @@ export default function BotsPage() {
           selectedLists: s.lists || [],
           loadingLists: false,
           listError: "",
+          // Publish Gate - per site, absent (older bot) means true, the
+          // schema default, never inferred as "no gate" from being unset.
+          requirePublishGate: s.requirePublishGate ?? true,
+          statusColumn: s.statusColumn || "Status",
+          publishedValue: s.publishedValue || "Published",
+          gateColumnOptions: [], gateLoadingColumns: false, gateColumnError: "",
+          gateValueOptions: [], gateLoadingValues: false, gateValueError: "",
         }))
       : [newSiteBlock()];
     setSiteBlocks(blocks);
@@ -430,6 +617,12 @@ export default function BotsPage() {
           libraryOptions: s.libraries, selectedLibraries: s.libraries,
           loadingLibraries: false, libraryError: "",
           listOptions: [], selectedLists: [], loadingLists: false, listError: "",
+          // Publish Gate - per site, same "absent means true" rule as above.
+          requirePublishGate: s.requirePublishGate ?? true,
+          statusColumn: s.statusColumn || "Status",
+          publishedValue: s.publishedValue || "Published",
+          gateColumnOptions: [], gateLoadingColumns: false, gateColumnError: "",
+          gateValueOptions: [], gateLoadingValues: false, gateValueError: "",
         }))
       : [newSiteBlock()]);
     setListSiteBlocks(lpl && lpl.listSites.length > 0
@@ -437,12 +630,18 @@ export default function BotsPage() {
           key: crypto.randomUUID(), siteUrlInput: s.siteUrl, loadedSiteUrl: s.siteUrl,
           libraryOptions: [], selectedLibraries: [], loadingLibraries: false, libraryError: "",
           listOptions: s.lists, selectedLists: s.lists, loadingLists: false, listError: "",
+          // List sites never use the Publish Gate (their own gate is the
+          // separate, always-on Solved Gate above) - schema defaults, unused.
+          requirePublishGate: true, statusColumn: "Status", publishedValue: "Published",
+          gateColumnOptions: [], gateLoadingColumns: false, gateColumnError: "",
+          gateValueOptions: [], gateLoadingValues: false, gateValueError: "",
         }))
       : [newSiteBlock()]);
     setSolvedStatusColumn(lpl?.solvedStatusColumn || "Status");
     setSolvedStatusValue(lpl?.solvedStatusValue || "Solved");
     setSourceWeightLibrary(lpl?.sourceWeights?.library ?? 1);
     setSourceWeightList(lpl?.sourceWeights?.list ?? 1);
+    setRetrievalMode(lpl?.retrievalMode ?? "merge");
     setSolvedGateSelection("");
     setColumnOptions([]);
     setColumnError("");
@@ -476,6 +675,7 @@ export default function BotsPage() {
     setSolvedStatusValue("Solved");
     setSourceWeightLibrary(1);
     setSourceWeightList(1);
+    setRetrievalMode("merge");
     setSolvedGateSelection("");
     setColumnOptions([]);
     setColumnError("");
@@ -761,6 +961,7 @@ export default function BotsPage() {
     }
   }
 
+
   useEffect(() => {
     if (!authReady) return;
     loadBots();
@@ -831,6 +1032,9 @@ export default function BotsPage() {
         setFormError("Add at least one library AND at least one list before creating this list+library bot.");
         return;
       }
+    } else if (contentType === "chat") {
+      // No data source to validate - a chat bot only needs a system prompt
+      // (already required via the textarea's own `required` attribute).
     } else {
       const sourceLabel = contentType === "list" ? "list" : "library";
       const hasEmptyBlock = contentType === "list"
@@ -880,10 +1084,15 @@ export default function BotsPage() {
       name: formData.get("name") as string,
       route: formData.get("route") as string,
       contentType,
-      sharepointSites: (contentType === "web" || contentType === "list+library") ? [] : siteBlocks.map((b) => ({
+      sharepointSites: (contentType === "web" || contentType === "list+library" || contentType === "chat") ? [] : siteBlocks.map((b) => ({
         siteUrl: b.loadedSiteUrl || b.siteUrlInput.trim(),
         libraries: contentType === "library" ? b.selectedLibraries : [],
         lists: contentType === "list" ? b.selectedLists : [],
+        // Publish Gate - per site; harmless/unused for a list-bot's site
+        // entries (their own gate is separate and always-on).
+        requirePublishGate: b.requirePublishGate,
+        statusColumn: b.statusColumn.trim() || "Status",
+        publishedValue: b.publishedValue.trim() || "Published",
       })),
       webSource: contentType === "web" ? {
         siteUrl: webSource.loadedSiteUrl || webSource.siteUrlInput.trim(),
@@ -896,8 +1105,12 @@ export default function BotsPage() {
         showImages: webSource.showImages,
       } : undefined,
       listPlusLibrary: contentType === "list+library" ? {
+        // Publish Gate - per site (unused/ignored on listSites entries below).
         librarySites: librarySiteBlocks.map((b) => ({
           siteUrl: b.loadedSiteUrl || b.siteUrlInput.trim(), libraries: b.selectedLibraries, lists: [],
+          requirePublishGate: b.requirePublishGate,
+          statusColumn: b.statusColumn.trim() || "Status",
+          publishedValue: b.publishedValue.trim() || "Published",
         })),
         listSites: listSiteBlocks.map((b) => ({
           siteUrl: b.loadedSiteUrl || b.siteUrlInput.trim(), libraries: [], lists: b.selectedLists,
@@ -907,6 +1120,7 @@ export default function BotsPage() {
         categoryColumn: "Category",
         subcategoryColumn: "SubCategory",
         sourceWeights: { library: sourceWeightLibrary, list: sourceWeightList },
+        retrievalMode,
         // Immutable after creation, same as qdrantCollection below - carry
         // the existing bot's collection names through on edit; a brand-new
         // bot leaves these empty and toBotConfigPayload derives them from
@@ -962,6 +1176,7 @@ export default function BotsPage() {
     setSolvedStatusValue("Solved");
     setSourceWeightLibrary(1);
     setSourceWeightList(1);
+    setRetrievalMode("merge");
     setSolvedGateSelection("");
     setColumnOptions([]);
     setColumnError("");
@@ -1175,13 +1390,30 @@ export default function BotsPage() {
                     />
                     Library + List (combined)
                   </label>
+                  <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                    <input
+                      type="radio"
+                      name="contentTypeRadio"
+                      checked={contentType === "chat"}
+                      disabled={!!isEditing}
+                      onChange={() => setContentType("chat")}
+                      className="border-gray-300 dark:border-navy-deep"
+                    />
+                    Chat (no data source)
+                  </label>
                 </div>
               </div>
-              {contentType === "list+library" ? (
+              {contentType === "chat" ? (
+                <div className="sm:col-span-2">
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    This bot answers directly from the AI model - no SharePoint, web source, or indexing. Good for classification-style questions (category, true/false, which option to pick).
+                  </p>
+                </div>
+              ) : contentType === "list+library" ? (
                 <div className="sm:col-span-2 space-y-4">
                   <div>
                     <p className="text-xs text-gray-500 dark:text-gray-400">
-                      Answers from BOTH sources at once, merged by relevance - both are always searched, never a fallback. See docs/LIST_PLUS_LIBRARY_BOT.md.
+                      Answers from a document library AND a SharePoint List, combined per Retrieval Mode below (merged together, or list-first with a library fallback). See docs/LIST_PLUS_LIBRARY_BOT.md.
                     </p>
                   </div>
                   <CombinedSiteBlockEditor
@@ -1194,7 +1426,10 @@ export default function BotsPage() {
                     onUpdate={(key, patch) => updateBlockIn(setLibrarySiteBlocks, key, patch)}
                     onLoad={(key) => loadOptionsIn("library", librarySiteBlocks, setLibrarySiteBlocks, key)}
                     onToggle={(key, value) => toggleOptionIn("library", setLibrarySiteBlocks, key, value)}
+                    onLoadGateColumns={(key) => loadGateColumnsIn(librarySiteBlocks, setLibrarySiteBlocks, key)}
+                    onLoadGateValues={(key) => loadGateValuesIn(librarySiteBlocks, setLibrarySiteBlocks, key)}
                   />
+
                   <CombinedSiteBlockEditor
                     blocks={listSiteBlocks}
                     kind="list"
@@ -1324,6 +1559,31 @@ export default function BotsPage() {
                           className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none"
                         />
                       </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-md border border-gray-300 dark:border-navy-deep p-3">
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Retrieval Mode</label>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">
+                      How the two sources are combined when answering a question.
+                    </p>
+                    <div className="space-y-1.5">
+                      <label className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+                        <input
+                          type="radio" name="retrievalMode" className="mt-0.5 border-gray-300 dark:border-navy-deep"
+                          checked={retrievalMode === "merge"}
+                          onChange={() => setRetrievalMode("merge")}
+                        />
+                        <span><strong>Always merge both sources</strong> (default) - the list and library are searched together on every question, weighted and ranked by Source Weights above.</span>
+                      </label>
+                      <label className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+                        <input
+                          type="radio" name="retrievalMode" className="mt-0.5 border-gray-300 dark:border-navy-deep"
+                          checked={retrievalMode === "sequential"}
+                          onChange={() => setRetrievalMode("sequential")}
+                        />
+                        <span><strong>Try list first, then library</strong> - the list is searched alone first; the library is only searched if the list didn&apos;t have an answer.</span>
+                      </label>
                     </div>
                   </div>
                   {formError && <p className="text-xs text-red-600 dark:text-red-400">{formError}</p>}
@@ -1630,70 +1890,100 @@ export default function BotsPage() {
                         )}
                       </>
                     )}
+                    {contentType === "library" && (
+                      <PublishGateFields
+                        block={block}
+                        onUpdate={(patch) => updateSiteBlock(block.key, patch)}
+                        onLoadColumns={() => loadGateColumnsIn(siteBlocks, setSiteBlocks, block.key)}
+                        onLoadValues={() => loadGateValuesIn(siteBlocks, setSiteBlocks, block.key)}
+                      />
+                    )}
                   </div>
                 ))}
                 {formError && <p className="text-xs text-red-600 dark:text-red-400">{formError}</p>}
               </div>
               )}
-              {contentType === "list+library" ? (
-                <div className="sm:col-span-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {contentType === "chat" ? (
+                <>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Library Qdrant Collection</label>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">Auto-generated, can never change after creation.</p>
-                    <input
-                      readOnly disabled
-                      value={isEditing?.listPlusLibrary?.libraryCollection || `${collectionPreview || "(fill in above)"}_library`}
-                      className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-gray-50 dark:bg-navy-deep/40 text-gray-500 dark:text-gray-400 px-3 py-2 text-sm cursor-not-allowed"
-                    />
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">AI Model</label>
+                    <select name="llmModel" defaultValue={isEditing?.llmModel || availableModels.llm[0] || ""} className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none">
+                      {modelOptions(availableModels.llm, isEditing?.llmModel).map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">List Qdrant Collection</label>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">Auto-generated, can never change after creation.</p>
-                    <input
-                      readOnly disabled
-                      value={isEditing?.listPlusLibrary?.listCollection || `${collectionPreview || "(fill in above)"}_list`}
-                      className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-gray-50 dark:bg-navy-deep/40 text-gray-500 dark:text-gray-400 px-3 py-2 text-sm cursor-not-allowed"
-                    />
-                  </div>
-                </div>
+                  {/* No Qdrant collection, embedding model, or indexing schedule for
+                      a chat bot - nothing is ever indexed. Hidden inputs carry
+                      harmless defaults so handleSave's shared formData reads and
+                      cron-format validation stay unmodified for every other type. */}
+                  <input type="hidden" name="qdrantCollection" value="" />
+                  <input type="hidden" name="embeddingModel" value="bge-base-en-v1.5" />
+                  <input type="hidden" name="indexingSchedule" value="0 2 * * *" />
+                </>
               ) : (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Qdrant Collection Name</label>
-                <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
-                  Auto-generated from the Route (or Bot Name as a fallback) - matches the bot&apos;s ID and can never be changed after creation.
-                </p>
-                <input
-                  readOnly
-                  disabled
-                  value={collectionPreview || "(fill in Route or Bot Name above)"}
-                  className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-gray-50 dark:bg-navy-deep/40 text-gray-500 dark:text-gray-400 px-3 py-2 text-sm cursor-not-allowed"
-                />
-              </div>
+                <>
+                  {contentType === "list+library" ? (
+                    <div className="sm:col-span-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Library Qdrant Collection</label>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">Auto-generated, can never change after creation.</p>
+                        <input
+                          readOnly disabled
+                          value={isEditing?.listPlusLibrary?.libraryCollection || `${collectionPreview || "(fill in above)"}_library`}
+                          className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-gray-50 dark:bg-navy-deep/40 text-gray-500 dark:text-gray-400 px-3 py-2 text-sm cursor-not-allowed"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">List Qdrant Collection</label>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">Auto-generated, can never change after creation.</p>
+                        <input
+                          readOnly disabled
+                          value={isEditing?.listPlusLibrary?.listCollection || `${collectionPreview || "(fill in above)"}_list`}
+                          className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-gray-50 dark:bg-navy-deep/40 text-gray-500 dark:text-gray-400 px-3 py-2 text-sm cursor-not-allowed"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Qdrant Collection Name</label>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
+                      Auto-generated from the Route (or Bot Name as a fallback) - matches the bot&apos;s ID and can never be changed after creation.
+                    </p>
+                    <input
+                      readOnly
+                      disabled
+                      value={collectionPreview || "(fill in Route or Bot Name above)"}
+                      className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-gray-50 dark:bg-navy-deep/40 text-gray-500 dark:text-gray-400 px-3 py-2 text-sm cursor-not-allowed"
+                    />
+                  </div>
+                  )}
+                  <input type="hidden" name="qdrantCollection" value={collectionPreview} />
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">LLM Model</label>
+                    <select name="llmModel" defaultValue={isEditing?.llmModel || availableModels.llm[0] || ""} className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none">
+                      {modelOptions(availableModels.llm, isEditing?.llmModel).map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Embedding Model</label>
+                    <select name="embeddingModel" defaultValue={isEditing?.embeddingModel || availableModels.embedding[0] || ""} className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none">
+                      {modelOptions(availableModels.embedding, isEditing?.embeddingModel).map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Indexing Schedule (Cron)</label>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
+                      Standard 5-field cron (minute hour day month weekday), e.g. <code>0 2 * * *</code> for 2 AM daily. Required.
+                    </p>
+                    <input required name="indexingSchedule" defaultValue={isEditing?.indexingSchedule || "0 2 * * *"} placeholder="0 2 * * *" className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none" />
+                  </div>
+                </>
               )}
-              <input type="hidden" name="qdrantCollection" value={collectionPreview} />
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">LLM Model</label>
-                <select name="llmModel" defaultValue={isEditing?.llmModel || availableModels.llm[0] || ""} className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none">
-                  {modelOptions(availableModels.llm, isEditing?.llmModel).map((m) => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Embedding Model</label>
-                <select name="embeddingModel" defaultValue={isEditing?.embeddingModel || availableModels.embedding[0] || ""} className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none">
-                  {modelOptions(availableModels.embedding, isEditing?.embeddingModel).map((m) => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Indexing Schedule (Cron)</label>
-                <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
-                  Standard 5-field cron (minute hour day month weekday), e.g. <code>0 2 * * *</code> for 2 AM daily. Required.
-                </p>
-                <input required name="indexingSchedule" defaultValue={isEditing?.indexingSchedule || "0 2 * * *"} placeholder="0 2 * * *" className="mt-1 block w-full rounded-md border border-gray-300 dark:border-navy-deep bg-white dark:bg-card dark:text-white px-3 py-2 text-sm focus:border-orange focus:outline-none" />
-              </div>
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Allowed Groups (Entra ID Object IDs)</label>

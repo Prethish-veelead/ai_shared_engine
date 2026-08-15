@@ -41,6 +41,16 @@ def sync_one_bot(bot_id: str, full: bool = False) -> None:
     (app/api/routes/admin.py's sync_bot_now/reindex_bot_now), so this one
     place covers every trigger. The admin notification bell polls the
     existing GET /admin/logs endpoint for these - no new read path needed."""
+    bot = registry.get_any(bot_id)   # allow disabled bots: their content can still be kept synced
+    if bot.content_type == "chat":
+        # No data source at all - nothing to sync, ever. Checked before any
+        # event logging so a chat bot's sync trigger (cron never schedules
+        # one - see main() below - but a stray manual "Sync Now" call could
+        # still reach here) is a clean, silent no-op rather than a logged
+        # "started" with no matching "completed"/"failed".
+        log.info("Bot '%s' is content_type=chat - nothing to sync, skipping", bot_id)
+        return
+
     label = "Reindex" if full else "Sync"
     try:
         with _session_factory()() as db:
@@ -50,7 +60,6 @@ def sync_one_bot(bot_id: str, full: bool = False) -> None:
         pass  # logging the start must never block the sync itself
 
     try:
-        bot = registry.get_any(bot_id)   # allow disabled bots: their content can still be kept synced
         # web bots read their tenant from bot.web, not bot.sharepoint (which
         # they never set - see app/bots/schema.py's _valid_content_source).
         # list+library bots read tenant from bot.list_plus_library.
@@ -117,6 +126,8 @@ def main() -> None:
     registry.load()
     scheduler = BlockingScheduler(timezone="UTC")
     for bot in registry.all():
+        if bot.content_type == "chat":
+            continue   # no data source - nothing to ever sync
         scheduler.add_job(
             sync_one_bot, CronTrigger.from_crontab(bot.indexing.schedule),
             args=[bot.id], id=f"sync-{bot.id}", replace_existing=True,

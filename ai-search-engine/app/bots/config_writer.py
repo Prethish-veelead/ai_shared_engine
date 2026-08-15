@@ -106,7 +106,10 @@ def delete_bot(bot_id: str, *, vector_store=None, db=None) -> BotConfig:
         if cfg.content_type == "list+library":
             vector_store.delete_collection(cfg.vectorstore.library_collection)
             vector_store.delete_collection(cfg.vectorstore.list_collection)
-        else:
+        elif cfg.content_type != "chat":
+            # chat bots have no Qdrant collection at all (vectorstore.collection
+            # is None - see app/bots/schema.py's _valid_content_source) -
+            # nothing to delete.
             vector_store.delete_collection(cfg.vectorstore.collection)
 
     if db is not None:

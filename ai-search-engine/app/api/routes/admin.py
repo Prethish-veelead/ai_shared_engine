@@ -62,7 +62,16 @@ def list_bots() -> list[dict]:
         # sharepoint is null for content_type=web/list+library bots (they use
         # `web`/`list_plus_library` instead - see app/bots/schema.py's
         # _valid_content_source).
-        "sharepointSites": [{"siteUrl": s.site_url, "libraries": s.libraries, "lists": s.lists} for s in b.sharepoint.sites] if b.sharepoint else [],
+        # Publish Gate fields are per-site (SharePointSite), not per-bot - see
+        # app/bots/schema.py's SharePointSite docstring - so each site entry
+        # round-trips its own requirePublishGate/statusColumn/publishedValue.
+        "sharepointSites": [{
+            "siteUrl": s.site_url, "libraries": s.libraries, "lists": s.lists,
+            "requirePublishGate": s.require_publish_gate,
+            "statusColumn": s.status_column, "publishedValue": s.published_value,
+        } for s in b.sharepoint.sites] if b.sharepoint else [],
+        # List-bot-only gate fields (see SharePointConfig.status_column's
+        # docstring) - unrelated to the per-site library Publish Gate above.
         "sharepointStatusColumn": b.sharepoint.status_column if b.sharepoint else None,
         "sharepointPublishedValue": b.sharepoint.published_value if b.sharepoint else None,
         "sharepointCategoryColumn": b.sharepoint.category_column if b.sharepoint else None,
@@ -78,7 +87,14 @@ def list_bots() -> list[dict]:
         # edit -> save doesn't silently reset any of it (the same bug class
         # this function's docstring already fixed for sharepoint/web).
         "listPlusLibrary": ({
-            "librarySites": [{"siteUrl": s.site_url, "libraries": s.libraries, "lists": s.lists} for s in b.list_plus_library.library_sites],
+            # Publish Gate fields are per-site here too (same SharePointSite
+            # type as sharepointSites above) - librarySites entries round-trip
+            # their own requirePublishGate/statusColumn/publishedValue.
+            "librarySites": [{
+                "siteUrl": s.site_url, "libraries": s.libraries, "lists": s.lists,
+                "requirePublishGate": s.require_publish_gate,
+                "statusColumn": s.status_column, "publishedValue": s.published_value,
+            } for s in b.list_plus_library.library_sites],
             "listSites": [{"siteUrl": s.site_url, "libraries": s.libraries, "lists": s.lists} for s in b.list_plus_library.list_sites],
             "solvedStatusColumn": b.list_plus_library.solved_status_column,
             "solvedStatusValue": b.list_plus_library.solved_status_value,
@@ -88,6 +104,7 @@ def list_bots() -> list[dict]:
                 "library": b.list_plus_library.source_weights.library,
                 "list": b.list_plus_library.source_weights.list,
             },
+            "retrievalMode": b.list_plus_library.retrieval_mode,
             "libraryCollection": b.vectorstore.library_collection,
             "listCollection": b.vectorstore.list_collection,
         } if b.list_plus_library else None),
@@ -133,7 +150,14 @@ def index_status(bot_id: str | None = None, db: Session = Depends(get_session)) 
         # content_type=list+library bots have no `bot.sharepoint` at all (its
         # two site groups live under bot.list_plus_library instead) and write
         # to TWO collections, so both need their own branch here.
-        if bot.content_type == "web":
+        if bot.content_type == "chat":
+            # No data source, no Qdrant collection, nothing ever synced -
+            # store.index_stats(None) would be an unguarded None pass-through
+            # for this content type, so short-circuit before reaching it.
+            stats = {"documents": 0, "chunks": 0}
+            current_keys = set()
+            total_libraries = 0
+        elif bot.content_type == "web":
             stats = store.index_stats(bot.vectorstore.collection)
             current_keys = {(bot.web.site_url, WEB_SYNC_LIBRARY)}
             total_libraries = 1
@@ -401,6 +425,108 @@ def sharepoint_list_column_values(site_url: str, list_name: str, column: str,
         seen.add(str(raw).strip())
         if len(seen) >= _MAX_VALUES:
             break
+    return sorted(seen)
+
+
+# A SharePoint document library's /delta response never reliably includes
+# listItem fields (see SharePointClient.get_fields's docstring - "Delta
+# responses don't reliably include these, so we fetch per changed item"),
+# unlike a plain List's /items?$expand=fields, which returns every row's
+# fields in one paged call. Discovering a library's columns/values therefore
+# costs one EXTRA Graph call per sampled file, so both are capped at a
+# smaller sample than the list endpoints above to bound how many of those
+# calls one "Load Columns"/"Load Values" click makes.
+_LIBRARY_COLUMN_SAMPLE_SIZE = 20
+_LIBRARY_VALUE_SAMPLE_SIZE = 200
+
+
+@router.get("/sharepoint/library-columns")
+def sharepoint_library_columns(site_url: str, library_name: str,
+                                tenant: str = "veelead-development") -> list[str]:
+    """Return the non-system column names for a specific SharePoint document
+    library - the library-side counterpart of sharepoint_list_columns above.
+    Used by the Publish Gate section of both the plain library bot form and
+    the list+library bot's Library Sites block, so the admin can pin a
+    'status_column' without knowing the internal Graph field name in advance.
+
+    Samples up to _LIBRARY_COLUMN_SAMPLE_SIZE files, unions their listItem
+    field keys, and subtracts the same known system-field set
+    sharepoint_list_columns already strips (a document library's files
+    carry the same SharePoint listItem plumbing fields a plain List's rows
+    do, since a library is a list under the hood too)."""
+    from app.ingestion.indexer import LIST_SYSTEM_FIELDS
+    from app.ingestion.sharepoint_client import SharePointClient
+    from app.ingestion.tenant_resolver import resolve_tenant
+
+    creds = resolve_tenant(tenant)
+    client = SharePointClient(creds.tenant_id, creds.client_id, creds.client_secret)
+    try:
+        site_id = client.resolve_site(site_url)
+        all_drives = client.resolve_drives(site_id)
+        if library_name not in all_drives:
+            raise UpstreamError(
+                f"Library '{library_name}' not found on site '{site_url}'. "
+                f"Available: {sorted(all_drives)}"
+            )
+        drive_id = all_drives[library_name]
+        items, _next_delta = client.delta(drive_id, None)
+        sample = [item for item in items if not item.deleted][:_LIBRARY_COLUMN_SAMPLE_SIZE]
+        seen: set[str] = set()
+        for item in sample:
+            seen.update(client.get_fields(drive_id, item.doc_id).keys())
+    except UpstreamError:
+        raise
+    except Exception as exc:
+        raise UpstreamError(f"Failed to fetch columns for library '{library_name}': {exc}") from exc
+
+    extra_system = {"id", "Title", "Modified", "Created", "Author", "Editor"}
+    return sorted(
+        col for col in seen
+        if col not in LIST_SYSTEM_FIELDS and col not in extra_system and not col.startswith("@")
+    )
+
+
+@router.get("/sharepoint/library-column-values")
+def sharepoint_library_column_values(site_url: str, library_name: str, column: str,
+                                      tenant: str = "veelead-development") -> list[str]:
+    """Return the distinct non-null string values for one column across a
+    sample of files in a SharePoint document library, capped at
+    _LIBRARY_VALUE_SAMPLE_SIZE files scanned (bounding Graph calls - see the
+    module-level comment above sharepoint_library_columns) and
+    _LIBRARY_VALUE_SAMPLE_SIZE distinct values returned. Used by the Publish
+    Gate section's 'Load Values' button so the admin can pick the exact
+    'published_value' (e.g. 'Published', 'Approved') from a dropdown rather
+    than guessing."""
+    from app.ingestion.sharepoint_client import SharePointClient
+    from app.ingestion.tenant_resolver import resolve_tenant
+
+    creds = resolve_tenant(tenant)
+    client = SharePointClient(creds.tenant_id, creds.client_id, creds.client_secret)
+    try:
+        site_id = client.resolve_site(site_url)
+        all_drives = client.resolve_drives(site_id)
+        if library_name not in all_drives:
+            raise UpstreamError(
+                f"Library '{library_name}' not found on site '{site_url}'. "
+                f"Available: {sorted(all_drives)}"
+            )
+        drive_id = all_drives[library_name]
+        items, _next_delta = client.delta(drive_id, None)
+        sample = [item for item in items if not item.deleted][:_LIBRARY_VALUE_SAMPLE_SIZE]
+        seen: set[str] = set()
+        for item in sample:
+            raw = client.get_fields(drive_id, item.doc_id).get(column)
+            if raw is None or raw == "":
+                continue
+            seen.add(str(raw).strip())
+            if len(seen) >= _LIBRARY_VALUE_SAMPLE_SIZE:
+                break
+    except UpstreamError:
+        raise
+    except Exception as exc:
+        raise UpstreamError(
+            f"Failed to fetch values for column '{column}' in library '{library_name}': {exc}"
+        ) from exc
     return sorted(seen)
 
 

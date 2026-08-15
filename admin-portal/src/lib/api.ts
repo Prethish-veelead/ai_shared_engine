@@ -41,6 +41,18 @@ export interface SharePointSiteEntry {
   siteUrl: string;
   libraries: string[];
   lists: string[];
+  // Library-file Publish Gate - PER SITE, not per-bot (app/bots/schema.py's
+  // SharePointSite), since two library sites commonly use two different
+  // status schemas. Meaningful only when this entry contributes `libraries`;
+  // ignored for a `lists` entry (the list side has its own separate,
+  // always-on solved-gate instead - see ListPlusLibraryEntry below).
+  // Optional so an older bot saved before this field existed still parses -
+  // absent means true (the schema default: gate on, matching every existing
+  // site's real behavior), never inferred from statusColumn/publishedValue
+  // being blank.
+  requirePublishGate?: boolean;
+  statusColumn?: string;
+  publishedValue?: string;
 }
 
 export interface ResponseFieldEntry {
@@ -73,11 +85,17 @@ export interface WebSourceEntry {
 
 // content_type: list+library bots (ai-search-engine/app/bots/schema.py
 // ListPlusLibraryConfig) answer from a document library AND a SharePoint
-// List at once, merged by relevance - never a sequential fallback. Two
-// independent site groups (librarySites/listSites) since a library and a
-// list on the same SharePointSite entry would collide with the existing
-// library/list mutual-exclusivity rule other content types rely on.
+// List, combined per retrievalMode: "merge" (default) queries both at once,
+// merged by relevance; "sequential" tries the list alone first and only
+// queries the library if the list had no answer. Two independent site groups
+// (librarySites/listSites) since a library and a list on the same
+// SharePointSiteEntry would collide with the existing library/list
+// mutual-exclusivity rule other content types rely on.
 export interface ListPlusLibraryEntry {
+  // Each entry's own requirePublishGate/statusColumn/publishedValue (on
+  // SharePointSiteEntry) gates that site's files - the library-side Publish
+  // Gate is per-site, not per-bot, so two library sites with different
+  // status schemas can each have their own gate.
   librarySites: SharePointSiteEntry[];
   listSites: SharePointSiteEntry[];
   // The solved-gate: only rows where solvedStatusColumn == solvedStatusValue
@@ -89,6 +107,10 @@ export interface ListPlusLibraryEntry {
   categoryColumn: string;
   subcategoryColumn: string;
   sourceWeights: { library: number; list: number };
+  // Optional so an older bot saved before this field existed still parses -
+  // absent means "merge" (schema.py's own default), same optionality pattern
+  // as WebSourceEntry.showImages below.
+  retrievalMode?: "merge" | "sequential";
   // Two REAL, separate Qdrant collections (not one shared collection) - see
   // app/bots/schema.py's VectorStoreConfig.
   libraryCollection: string;
@@ -105,7 +127,7 @@ export interface Bot {
   // a list at once) - never more than one at once for the first three;
   // list+library is the only hybrid type. Immutable after creation - see
   // config_writer.py.
-  contentType?: "library" | "list" | "web" | "list+library";
+  contentType?: "library" | "list" | "web" | "list+library" | "chat";
   // list+library bots only - see ListPlusLibraryEntry.
   listPlusLibrary?: ListPlusLibraryEntry;
   // The bot's SharePoint/Graph tenant slug and the SharePoint column-gate
@@ -114,6 +136,9 @@ export interface Bot {
   // from getBots() rather than silently resetting them to schema defaults
   // on every save (see the TEMPORARY tenant toggle note below).
   tenant?: string;
+  // List-bot-only gate fields (app/bots/schema.py SharePointConfig.
+  // status_column) - unrelated to the per-site library Publish Gate on
+  // SharePointSiteEntry above.
   sharepointStatusColumn?: string;
   sharepointPublishedValue?: string;
   sharepointCategoryColumn?: string;
@@ -419,6 +444,7 @@ export function deriveBotId(data: Partial<Bot>): string {
 function toBotConfigPayload(botId: string, data: Partial<Bot>) {
   const isWeb = data.contentType === "web";
   const isListPlusLibrary = data.contentType === "list+library";
+  const isChat = data.contentType === "chat";
   return {
     id: botId,
     name: data.name,
@@ -426,11 +452,14 @@ function toBotConfigPayload(botId: string, data: Partial<Bot>) {
     enabled: data.enabled ?? true,
     content_type: data.contentType || "library",
     // Mutually exclusive - a web bot sets `web`, a list+library bot sets
-    // `list_plus_library`, everything else sets `sharepoint`
-    // (app/bots/schema.py's _valid_content_source enforces this server-side
-    // too; omitting the unused keys here rather than sending empty ones
-    // avoids relying on that validator alone to catch a form bug).
-    ...(isWeb
+    // `list_plus_library`, a chat bot sets NEITHER (no data source at all),
+    // everything else sets `sharepoint` (app/bots/schema.py's
+    // _valid_content_source enforces this server-side too; omitting the
+    // unused keys here rather than sending empty ones avoids relying on
+    // that validator alone to catch a form bug).
+    ...(isChat
+      ? {}
+      : isWeb
       ? {
           web: {
             tenant: data.tenant || getSharePointTenant(),
@@ -453,7 +482,16 @@ function toBotConfigPayload(botId: string, data: Partial<Bot>) {
       ? {
           list_plus_library: {
             tenant: data.tenant || getSharePointTenant(),
-            library_sites: (data.listPlusLibrary?.librarySites || []).map((s) => ({ site_url: s.siteUrl, libraries: s.libraries, lists: [] })),
+            // Publish Gate fields are per-site here (see SharePointSiteEntry)
+            // - ?? not || for require_publish_gate, since an explicit false
+            // (admin chose "No gate" for this site) must never be coerced
+            // back to true by a falsy-value fallback.
+            library_sites: (data.listPlusLibrary?.librarySites || []).map((s) => ({
+              site_url: s.siteUrl, libraries: s.libraries, lists: [],
+              require_publish_gate: s.requirePublishGate ?? true,
+              status_column: s.statusColumn || "Status",
+              published_value: s.publishedValue || "Published",
+            })),
             list_sites: (data.listPlusLibrary?.listSites || []).map((s) => ({ site_url: s.siteUrl, libraries: [], lists: s.lists })),
             solved_status_column: data.listPlusLibrary?.solvedStatusColumn || "Status",
             solved_status_value: data.listPlusLibrary?.solvedStatusValue || "Solved",
@@ -463,12 +501,25 @@ function toBotConfigPayload(botId: string, data: Partial<Bot>) {
               library: data.listPlusLibrary?.sourceWeights?.library ?? 1.0,
               list: data.listPlusLibrary?.sourceWeights?.list ?? 1.0,
             },
+            retrieval_mode: data.listPlusLibrary?.retrievalMode || "merge",
           },
         }
       : {
           sharepoint: {
             tenant: data.tenant || getSharePointTenant(),
-            sites: (data.sharepointSites || []).map((s) => ({ site_url: s.siteUrl, libraries: s.libraries, lists: s.lists })),
+            // Publish Gate fields are per-site here (SharePointSiteEntry) for
+            // library bots - ?? not || for require_publish_gate, since an
+            // explicit false (admin chose "No gate" for this site) must
+            // never be coerced back to true by a falsy-value fallback.
+            sites: (data.sharepointSites || []).map((s) => ({
+              site_url: s.siteUrl, libraries: s.libraries, lists: s.lists,
+              require_publish_gate: s.requirePublishGate ?? true,
+              status_column: s.statusColumn || "Status",
+              published_value: s.publishedValue || "Published",
+            })),
+            // status_column/published_value below are the LIST-bot-only gate
+            // (app/bots/schema.py SharePointConfig) - unrelated to the
+            // per-site library gate above.
             status_column: data.sharepointStatusColumn || "Status",
             published_value: data.sharepointPublishedValue || "Published",
             category_column: data.sharepointCategoryColumn || "Category",
@@ -477,7 +528,10 @@ function toBotConfigPayload(botId: string, data: Partial<Bot>) {
         }),
     // list+library bots use TWO real collections, not one shared `collection`
     // (app/bots/schema.py's VectorStoreConfig) - see docs/LIST_PLUS_LIBRARY_BOT.md.
-    vectorstore: isListPlusLibrary
+    // Chat bots have no Qdrant collection at all - nothing is ever indexed.
+    vectorstore: isChat
+      ? {}
+      : isListPlusLibrary
       ? {
           library_collection: data.listPlusLibrary?.libraryCollection || `${botId}_library`,
           list_collection: data.listPlusLibrary?.listCollection || `${botId}_list`,
@@ -579,6 +633,22 @@ export const api = {
     // sharepoint_list_column_values) - lets the admin pick the exact
     // "solved" value (e.g. "Solved"/"Closed"/"Resolved") from a dropdown.
     return fetcher<string[]>(`/admin/sharepoint/list-column-values${buildQuery({ site_url: siteUrl, list_name: listName, column, tenant: getSharePointTenant() })}`);
+  },
+
+  async getSharePointLibraryColumns(siteUrl: string, libraryName: string): Promise<string[]> {
+    if (USE_MOCKS) return ["Status", "Category", "ReviewState"];
+    // Library-side counterpart of getSharePointListColumns, for the Publish
+    // Gate section (app/api/routes/admin.py sharepoint_library_columns) -
+    // real internal field names from a sample of real files.
+    return fetcher<string[]>(`/admin/sharepoint/library-columns${buildQuery({ site_url: siteUrl, library_name: libraryName, tenant: getSharePointTenant() })}`);
+  },
+
+  async getSharePointLibraryColumnValues(siteUrl: string, libraryName: string, column: string): Promise<string[]> {
+    if (USE_MOCKS) return ["Draft", "Published", "Approved"];
+    // Distinct values for the chosen library status column (app/api/routes/
+    // admin.py sharepoint_library_column_values) - lets the admin pick the
+    // exact "published" value from a dropdown rather than guessing.
+    return fetcher<string[]>(`/admin/sharepoint/library-column-values${buildQuery({ site_url: siteUrl, library_name: libraryName, column, tenant: getSharePointTenant() })}`);
   },
 
   async getChatHistory(params?: { bot_id?: string; user_id?: string; keyword?: string; limit?: number }): Promise<ChatHistoryRow[]> {

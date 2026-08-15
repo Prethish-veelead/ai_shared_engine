@@ -57,6 +57,35 @@ class RagPipeline:
         # exact same message shape from as before this feature existed.
         trimmed_history = trim_history(history, get_settings().chat_history_max_messages)
 
+        # chat: no data source at all - the LLM answers straight from the
+        # system prompt + question, e.g. classification-style questions
+        # ("which category", "true or false"). Never any citations, since
+        # nothing is ever retrieved.
+        if bot.content_type == "chat":
+            started = time.perf_counter()
+            wants_extra_fields = bool(bot.response_fields)
+            system = bot.prompt.system + build_response_format_instruction(bot.response_fields)
+            # Raw question as user_message, NOT build_user_message(question,
+            # context) - that helper hardcodes a "use ONLY the context below"
+            # instruction and an empty === CONTEXT === block, which would
+            # actively confuse a bot with no retrieved context at all.
+            chat = generate(
+                self._llm, system=system, user_message=question,
+                model=bot.models.llm, temperature=bot.prompt.temperature,
+                json_mode=wants_extra_fields, history=trimmed_history,
+            )
+            answer_text = chat.text
+            extra_fields: dict = {}
+            if wants_extra_fields:
+                answer_text, extra_fields = parse_response_fields(bot.id, chat.text, bot.response_fields)
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            return RagResponse(
+                answer=answer_text, citations=[], model=chat.model,
+                prompt_tokens=chat.prompt_tokens, completion_tokens=chat.completion_tokens,
+                embedding_tokens=0, response_time_ms=elapsed_ms,
+                extra_fields=extra_fields,
+            )
+
         # List bots with structured storage enabled AND at least one synced
         # table get routed to the query layer (exact SQL tools + semantic
         # search, model's choice) instead of the plain vector path below.
@@ -68,8 +97,9 @@ class RagPipeline:
                                      llm=self._llm, top_k=self._top_k, history=trimmed_history)
 
         # list+library: both a document library AND a SharePoint List
-        # answered together - always both sources, merged by score, never a
-        # sequential fallback. See app/rag/combined.py.
+        # answered together - merged by score (default) or list-first with a
+        # library fallback, per the bot's retrieval_mode. See
+        # app/rag/combined.py.
         if bot.content_type == "list+library":
             from app.rag.combined import answer_combined
             return answer_combined(bot, question, db=db, vector_store=self._store,

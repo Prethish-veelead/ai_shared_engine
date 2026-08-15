@@ -2,9 +2,14 @@
 
 A fourth bot content type, alongside `library`, `list`, and `web`. A
 list+library bot answers from a SharePoint document library (a KB) AND a
-SharePoint List (e.g. resolved helpdesk tickets) **at the same time** - both
-sources are always searched and merged by relevance, never a sequential
-fallback and never a "did source A answer?" gate.
+SharePoint List (e.g. resolved helpdesk tickets), combined per the bot's
+`retrieval_mode`:
+
+- **`merge`** (default): both sources are searched **at the same time** and
+  merged by relevance - no "did source A answer?" gate.
+- **`sequential`**: the list is tried alone first; the library is only
+  additionally searched if the list didn't have an answer. See
+  [Retrieval mode](#retrieval-mode) below.
 
 Motivating example: a helpdesk bot answers from a KB library and a List of
 admin-resolved tickets. Either source may hold the answer; the ticket list
@@ -41,8 +46,16 @@ content_type: list+library
 list_plus_library:
   tenant: veelead-solutions
   library_sites:
+    # The Publish Gate is PER SITE (require_publish_gate/status_column/
+    # published_value on SharePointSite), not per-bot - two library sites
+    # with different status schemas each get their own gate. Defaults to
+    # true/"Status"/"Published"; explicit false = index every file on that
+    # site, no gate.
     - site_url: https://veeleadsolutions.sharepoint.com/sites/helpdesk
       libraries: ["Helpdesk KB"]
+      require_publish_gate: true
+      status_column: Status
+      published_value: "Published"
   list_sites:
     - site_url: https://veeleadsolutions.sharepoint.com/sites/helpdesk
       lists: ["Resolved Tickets"]
@@ -53,6 +66,7 @@ list_plus_library:
   source_weights:
     library: 1.0
     list: 1.0
+  retrieval_mode: merge          # or "sequential" - see below; default "merge"
 vectorstore:
   library_collection: helpdesk_kb
   list_collection: helpdesk_tickets
@@ -83,9 +97,21 @@ In the bot editor, after picking the list source(s):
    returns every distinct value actually present in that column (capped at
    200), so `solved_status_value` is picked from real data, not typed.
 
-Both endpoints are read-only and reuse the same `SharePointClient`/
-`resolve_lists`/`list_items` calls the existing library/list pickers already
-use.
+The library side's Publish Gate works the same way, but PER SITE rather than
+once for the whole bot: each library site's own card in the admin form has
+its own "Load Columns"/"Load Values" pair (`GET /admin/sharepoint/
+library-columns` / `GET /admin/sharepoint/library-column-values`), sampling
+from whichever library is checked first on that site. Two library sites with
+different status schemas each discover and pin their own column/value
+independently. The one difference from the list-side flow above: a document
+library's `/delta` response never reliably includes a file's listItem fields
+(unlike a List's `/items?$expand=fields`, which returns every row's fields in
+one call), so each sampled file costs one extra Graph call - both endpoints
+therefore sample a smaller number of files (20 for column discovery, 200 for
+value discovery) rather than scanning the whole library.
+
+Both sets of endpoints are read-only and reuse the same `SharePointClient`
+calls the existing library/list pickers already use.
 
 ## Ingestion - reuses run_sync/run_list_sync unchanged, no new indexing code
 
@@ -106,10 +132,26 @@ publish-gate (`_is_list_item_published`) already reads - unsolved rows are
 never written to the list's Qdrant collection *or* its structured Postgres
 table (`structured_store=True` on the shim, so `sync_list_table` creates a
 real `ListTable` row for this bot's list side, unlike the "no SQL tables for
-list+library" placeholder in an earlier draft of this feature). This achieves
-the "deterministic hard filter, both in SQL and in the merged vector pool"
-requirement via one simpler mechanism (filter once at index time) instead of
-filtering on every single query.
+list+library" placeholder in an earlier draft of this feature).
+
+**The library-side Publish Gate is a deliberate on/off switch, per site, not
+inferred from blank fields**: each library site's own `require_publish_gate`
+(on `SharePointSite`, same field a plain library bot's `sharepoint.sites`
+entries carry) defaults to `true` for every site, including ones saved before
+this field existed - "no gate" only takes effect when an admin explicitly
+picks it for that specific site in the UI. It's per-site rather than
+per-bot because two library sites commonly use two different status schemas
+- a single bot-wide gate couldn't express "Status/Published" for one site and
+"ReviewState/Approved" for another. This matters because the gate itself has
+no leniency for a missing column (unlike the list side's solved-gate,
+which includes a row if the column is simply absent from it) - a library with
+no real status column, gated by mistake, would exclude every file. The
+explicit off-switch is the escape hatch for that case, without ever silently
+exposing drafts on a bot an admin simply hasn't configured yet.
+
+Both gates achieve the "deterministic hard filter, both in SQL and in the
+merged vector pool" requirement via one simpler mechanism (filter once at
+index time) instead of filtering on every single query.
 
 ## Answering - the existing structured orchestrator, extended by two optional params
 
@@ -123,23 +165,58 @@ passes the library side in via two new **optional** parameters on
 `primary_weight`/`secondary_weight` (all default to today's exact
 single-collection behavior for every existing pure list bot - `None`/`1.0`/`1.0`).
 
-When `secondary_collection` is set, the `semantic_search` tool (and the
-orchestrator's tool-round-cap fallback) retrieves from **both** collections via
+When `secondary_collection` is set and `retrieval_mode` is `merge` (the
+default), the `semantic_search` tool (and the orchestrator's tool-round-cap
+fallback) retrieves from **both** collections via
 `query_tools.weighted_merge_retrieve`: each side's raw cosine scores are
 multiplied by that side's `source_weights` value, the two pools are merged,
 de-duplicated by `doc_id` (keeping the higher-weighted-score occurrence), and
 the top-k of the combined set is returned - both sources are always queried in
-the same call, there is no sequential fallback anywhere in this path.
+the same call, there is no sequential fallback in this mode.
 
 Exact/count/lookup/join questions still go through the **same fixed SQL
 toolset** (`count_rows`/`get_row`/`filter_rows`/`aggregate`/`join_lists`/
 `distinct_values`) every list bot already has, scoped to the list side's
 tables - the model picks per question exactly as it already does for a plain
-list bot.
+list bot, in both retrieval modes.
+
+## Retrieval mode
+
+`retrieval_mode: sequential` (`app/rag/structured/sequential.py`) trades the
+merge-mode guarantee ("both sources always considered together") for a
+list-first, library-as-fallback flow, useful when the list is meant to be the
+authoritative/preferred source (e.g. "does a resolved ticket already cover
+this?") and the library is a broader fallback:
+
+1. **Phase A**: the model runs its normal tool-calling loop with the library
+   collection locked out entirely (`ToolContext.secondary_collection=None`) -
+   from `semantic_search`'s point of view this is indistinguishable from a
+   plain list bot. The model is instructed to respond with an exact sentinel
+   string if it cannot answer from the list alone.
+2. If phase A produces a real answer (no sentinel), that's the final answer -
+   **the library is never queried.**
+3. If phase A returns the sentinel, phase B unlocks the library
+   (`ToolContext.secondary_collection` is set to the real library collection)
+   and continues the same conversation with one more message telling the
+   model the library is now available. `semantic_search` itself is unchanged
+   in either phase - `weighted_merge_retrieve` already short-circuits to
+   primary-only when `secondary_collection` is `None`, which is the only
+   toggle sequential mode needs.
+4. If neither phase produces a real answer, the final answer is the same
+   `"I don't know."` text `answer_structured` already falls back to today -
+   the sentinel is never shown to the user.
+
+There is no similarity-score threshold anywhere in this path (or anywhere
+else in this codebase) - "the list has no answer" is the model's own
+judgment, not a tuned cutoff. The round-cap fallback (5 tool-round-trips
+without a final answer) is unconditionally merge-mode in both phases, even
+under `sequential` - it's already the degraded/emergency path, and merging
+both sources maximizes the chance of a useful answer rather than nesting a
+second capped loop inside an already-failed one.
 
 ## Non-goals
 
-No confidence-threshold or "try the KB first, fall back to tickets" logic
-anywhere in this path - both sources are unconditionally queried on every
-semantic question. No changes to `library`/`list`/`web` single-source bots,
-the retriever, `Indexer`'s chunking internals, or `RagResponse`'s shape.
+No confidence-threshold-based gating (in either mode) - `sequential` mode's
+"did the list answer?" check is the model's own judgment, never a similarity
+score. No changes to `library`/`list`/`web` single-source bots, the retriever,
+`Indexer`'s chunking internals, or `RagResponse`'s shape.

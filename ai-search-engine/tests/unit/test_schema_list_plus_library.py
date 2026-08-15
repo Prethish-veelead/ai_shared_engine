@@ -36,6 +36,7 @@ def test_valid_list_plus_library_bot_loads():
     assert bot.list_plus_library.solved_status_value == "Solved"
     assert bot.list_plus_library.source_weights.library == 1.0
     assert bot.list_plus_library.source_weights.list == 1.0
+    assert bot.list_plus_library.retrieval_mode == "merge"
 
 
 def test_missing_list_plus_library_block_rejected():
@@ -111,6 +112,22 @@ def test_same_name_different_site_is_not_a_collision():
     }
     bot = BotConfig(**kwargs)   # should not raise
     assert bot.content_type == "list+library"
+
+
+# ---- retrieval_mode ----
+
+def test_retrieval_mode_sequential_accepted():
+    kwargs = _kwargs()
+    kwargs["list_plus_library"] = {**kwargs["list_plus_library"], "retrieval_mode": "sequential"}
+    bot = BotConfig(**kwargs)
+    assert bot.list_plus_library.retrieval_mode == "sequential"
+
+
+def test_retrieval_mode_invalid_value_rejected():
+    kwargs = _kwargs()
+    kwargs["list_plus_library"] = {**kwargs["list_plus_library"], "retrieval_mode": "parallel_but_smarter"}
+    with pytest.raises(ValueError):
+        BotConfig(**kwargs)
 
 
 # ---- vectorstore split ----

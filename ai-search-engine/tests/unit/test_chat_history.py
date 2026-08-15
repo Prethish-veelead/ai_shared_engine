@@ -294,3 +294,81 @@ def test_answer_structured_splices_history_with_no_tool_replay():
     assert messages[2] == history[1]
     assert messages[3] == {"role": "user", "content": "what assets does he have?"}
     assert len(messages) == 4
+
+
+# ---- content_type="chat": no retrieval, no citations, LLM straight from the system prompt ----
+
+class _ScriptedChatLLMClient(LLMClient):
+    """Returns one scripted response_text per chat() call - lets a test
+    control exactly what the model "said" (plain text, or a JSON blob for
+    the response_fields case) without a real LLM."""
+
+    def __init__(self, response_text: str):
+        self._response_text = response_text
+        self.chat_calls = []
+
+    def chat(self, system, user, model, temperature=0.2, json_mode=False, history=None):
+        self.chat_calls.append({"system": system, "user": user, "history": history, "json_mode": json_mode})
+        return ChatResult(text=self._response_text, prompt_tokens=7, completion_tokens=3, model=model)
+
+    def chat_with_tools(self, messages, model, tools, temperature=0.2):
+        raise AssertionError("a chat bot should never call chat_with_tools")
+
+    def embed(self, texts, model, is_query=False):
+        raise AssertionError("a chat bot should never embed anything - no retrieval")
+
+
+def _chat_bot(**overrides) -> BotConfig:
+    return BotConfig(
+        id="test_chat", name="Test Chat Bot", route="/ask/test_chat",
+        content_type="chat",
+        vectorstore=VectorStoreConfig(),
+        prompt=PromptConfig(system="You classify tickets into Hardware/Software/Network."),
+        **overrides,
+    )
+
+
+def test_chat_bot_never_touches_the_vector_store():
+    store, llm = _FakeVectorStore(), _ScriptedChatLLMClient("Hardware")
+    pipeline = RagPipeline(store, llm)
+    response = pipeline.answer(_chat_bot(), "My laptop won't turn on, which category?", db=None)
+
+    assert store.search_calls == []
+    assert response.answer == "Hardware"
+    assert response.citations == []
+    assert response.embedding_tokens == 0
+
+
+def test_chat_bot_forwards_history_like_every_other_bot():
+    store, llm = _FakeVectorStore(), _ScriptedChatLLMClient("Software")
+    pipeline = RagPipeline(store, llm)
+    history = [{"role": "user", "content": "earlier question"}, {"role": "assistant", "content": "earlier answer"}]
+    pipeline.answer(_chat_bot(), "and this one?", db=None, history=history)
+
+    assert llm.chat_calls[0]["history"] == history
+    assert llm.chat_calls[0]["user"] == "and this one?"   # raw question, no context wrapper
+
+
+def test_chat_bot_with_response_fields_parses_json_and_still_has_no_citations():
+    from app.bots.schema import ResponseField
+
+    llm = _ScriptedChatLLMClient('{"answer": "Hardware", "confidence": "high"}')
+    pipeline = RagPipeline(_FakeVectorStore(), llm)
+    bot = _chat_bot(response_fields=[ResponseField(name="confidence", prompt="How sure are you?")])
+
+    response = pipeline.answer(bot, "which category?", db=None)
+
+    assert llm.chat_calls[0]["json_mode"] is True
+    assert response.answer == "Hardware"
+    assert response.extra_fields == {"confidence": "high"}
+    assert response.citations == []
+
+
+def test_chat_bot_without_response_fields_skips_json_mode():
+    llm = _ScriptedChatLLMClient("plain text answer")
+    pipeline = RagPipeline(_FakeVectorStore(), llm)
+    response = pipeline.answer(_chat_bot(), "true or false: the sky is blue", db=None)
+
+    assert llm.chat_calls[0]["json_mode"] is False
+    assert response.answer == "plain text answer"
+    assert response.extra_fields == {}

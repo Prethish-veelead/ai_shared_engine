@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_llm_client, get_vector_store
-from app.bots.schema import BotConfig
+from app.bots.schema import BotConfig, SharePointSite
 from app.core.exceptions import ConfigError, UpstreamError
 from app.core.logging import get_logger
 from app.db.list_tables import reconcile_list_tables, sync_list_table
@@ -130,10 +130,17 @@ def reset_delta_tokens(db: Session, bot: BotConfig) -> None:
     db.commit()
 
 
-def _is_published(item: ChangedItem, bot: BotConfig) -> bool:
-    sp = bot.sharepoint
-    status = (item.fields or {}).get(sp.status_column)
-    return str(status).strip().lower() == sp.published_value.strip().lower()
+def _is_published(item: ChangedItem, site: SharePointSite) -> bool:
+    """The Publish Gate is per-SITE, not per-bot (see SharePointSite.
+    require_publish_gate's docstring) - two library sites on the same bot
+    commonly use different status schemas, so each site's own gate settings
+    are read here, never the bot's."""
+    # Explicit, deliberate opt-out - never inferred from status_column/
+    # published_value being absent or left at their defaults.
+    if not site.require_publish_gate:
+        return True
+    status = (item.fields or {}).get(site.status_column)
+    return str(status).strip().lower() == site.published_value.strip().lower()
 
 
 def _metadata(item: ChangedItem, bot: BotConfig) -> dict:
@@ -227,10 +234,11 @@ def run_sync(bot: BotConfig, db: Session, drive_id_for: dict[int, dict[str, str]
                         item.fields = sp.get_fields(drive_id, item.doc_id)
 
                         # Publish gate: only Published docs are indexed; anything else
-                        # (incl. un-published) has its chunks removed.
-                        if not _is_published(item, bot):
-                            log.info("Skipping/removing '%s' (Status != %s)",
-                                     item.name, bot.sharepoint.published_value)
+                        # (incl. un-published) has its chunks removed. Per-site gate
+                        # (this `site`, not `bot`) - see _is_published's docstring.
+                        if not _is_published(item, site):
+                            log.info("Skipping/removing '%s' (%s != %s)",
+                                     item.name, site.status_column, site.published_value)
                             indexer.delete_document(collection=collection, doc_id=item.doc_id)
                             continue
 
@@ -442,11 +450,12 @@ def _library_shim(bot: BotConfig):
         id=bot.id,
         sharepoint=SimpleNamespace(
             tenant=cfg.tenant,
+            # cfg.library_sites entries are real SharePointSite objects, each
+            # already carrying its own require_publish_gate/status_column/
+            # published_value (the Publish Gate is per-site - see
+            # SharePointSite's docstring) - nothing to map here, unlike the
+            # bot-wide fields this shim used to need before that gate moved.
             sites=cfg.library_sites,
-            # Library KB files use the standard publish gate (Status ==
-            # Published) - these match SharePointConfig's own defaults.
-            status_column="Status",
-            published_value="Published",
             category_column=cfg.category_column,
             subcategory_column=cfg.subcategory_column,
         ),

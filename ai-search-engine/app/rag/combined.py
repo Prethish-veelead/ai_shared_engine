@@ -5,11 +5,15 @@ structured/orchestrator.py) almost entirely unmodified, not a parallel
 reimplementation. A list+library bot's list side works exactly like a plain
 list bot's: same catalog, same SQL tools (count_rows/get_row/filter_rows/
 aggregate/join_lists/distinct_values), same citation logic. The one thing
-that's genuinely different - semantic questions must search BOTH the list
-collection AND the library collection, weighted and merged, never a
-sequential fallback - is handled entirely inside query_tools.
-weighted_merge_retrieve, which answer_structured now threads its optional
-secondary_collection/weights parameters into.
+that's genuinely different is how semantic questions combine the list
+collection and the library collection - controlled per-bot by
+cfg.retrieval_mode (app/bots/schema.py's ListPlusLibraryConfig): "merge"
+(default) queries both always and weight-merges them, handled entirely
+inside query_tools.weighted_merge_retrieve; "sequential" tries the list
+alone first and only queries the library if the list had no answer, handled
+by app/rag/structured/sequential.py. Either way, answer_structured is
+threaded the same optional secondary_collection/weights/retrieval_mode
+parameters.
 
 A duck-typed shim (same technique as app/workers/sync_job.py's
 _library_shim/_list_shim) presents the list side as a normal BotConfig to
@@ -53,4 +57,5 @@ def answer_combined(bot: BotConfig, question: str, *, db: Session,
         secondary_collection=bot.vectorstore.library_collection,
         primary_weight=cfg.source_weights.list,
         secondary_weight=cfg.source_weights.library,
+        retrieval_mode=cfg.retrieval_mode,
     )

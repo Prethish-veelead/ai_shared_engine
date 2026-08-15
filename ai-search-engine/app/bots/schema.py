@@ -16,6 +16,22 @@ class SharePointSite(BaseModel):
     # a single bot only ever populates one of libraries/lists, not both.
     lists: list[str] = Field(default_factory=list)
 
+    # Library-file Publish Gate - PER SITE, not per-bot, since two libraries
+    # on two different SharePoint sites commonly use two different status
+    # schemas (different column name/value entirely) - a single bot-wide gate
+    # can't express that. Meaningful only when this site contributes
+    # `libraries` (ignored/unused for a site's `lists` entries - the list
+    # side has its own separate, always-on gate; see
+    # ListPlusLibraryConfig.solved_status_column). Defaults to
+    # True/"Status"/"Published" so every existing single-site bot's real
+    # behavior is unchanged. Explicit False is a deliberate per-site choice
+    # to index every file on that site, never inferred from status_column/
+    # published_value being blank - same "why a separate bool" rationale as
+    # every other publish-gate toggle in this codebase.
+    require_publish_gate: bool = True
+    status_column: str = "Status"
+    published_value: str = "Published"
+
 
 class SourceWeights(BaseModel):
     """Optional per-source relevance score multipliers for list+library bots.
@@ -33,11 +49,16 @@ class SourceWeights(BaseModel):
 class ListPlusLibraryConfig(BaseModel):
     """Configuration for content_type='list+library' bots only.
 
-    A list+library bot answers from two independent SharePoint sources at the
-    same time - a document library (KB files, chunked and embedded) and a
-    SharePoint List (e.g. resolved helpdesk tickets, row-per-item). Both
-    sources are ALWAYS queried; there is no sequential fallback and no
-    'did source A answer?' gate. Results are merged by relevance score.
+    A list+library bot answers from two independent SharePoint sources - a
+    document library (KB files, chunked and embedded) and a SharePoint List
+    (e.g. resolved helpdesk tickets, row-per-item). How the two are combined
+    for a semantic question depends on retrieval_mode: "merge" (the default)
+    ALWAYS queries both at once and merges by weighted relevance score - no
+    'did source A answer?' gate. "sequential" tries the list alone first and
+    only additionally queries the library if the model couldn't answer from
+    the list (see app/rag/structured/sequential.py). Either way, structured/
+    SQL questions (count_rows/filter_rows/etc.) only ever read the list side,
+    since the library has no row-equivalent data to answer those with.
 
     Why a separate config block (not reusing sharepoint.sites)?
     The existing SharePointConfig.sites entries mix libraries and lists on the
@@ -58,6 +79,10 @@ class ListPlusLibraryConfig(BaseModel):
     # Same shape as SharePointConfig.sites - each entry has a site_url and
     # a list of library names on that site. Only libraries[] is used here;
     # lists[] on any entry is ignored (and rejected by the validator below).
+    # Each site's own require_publish_gate/status_column/published_value
+    # fields (on SharePointSite) gate that site's files - the library-side
+    # Publish Gate is per-site, not per-bot, so two library sites with
+    # different status schemas can each have their own gate.
     library_sites: list[SharePointSite] = Field(default_factory=list)
 
     # Sites that contribute SharePoint Lists (structured rows, e.g. resolved
@@ -75,7 +100,9 @@ class ListPlusLibraryConfig(BaseModel):
     # store entirely (not just ranked lower), so only resolved/solved items
     # can ever appear in answers. If the column is absent on a row (some
     # lists have no status column at all), the row is included - same
-    # optional-gate logic as _is_list_item_published in sync_job.py.
+    # optional-gate logic as _is_list_item_published in sync_job.py. Always
+    # on for the list side - unlike the library-side gate below, there's no
+    # "no gate" option here.
     solved_status_column: str = "Status"
     solved_status_value: str = "Solved"
 
@@ -84,9 +111,20 @@ class ListPlusLibraryConfig(BaseModel):
     category_column: str = "Category"
     subcategory_column: str = "SubCategory"
 
-    # Per-source score multipliers applied before the merged rank. Both
-    # default to 1.0 so omitting this block means equal-weight merge.
+    # Per-source score multipliers applied before the merged rank (both
+    # modes). Both default to 1.0 so omitting this block means equal-weight
+    # merge in "merge" mode, and equal-weight fallback scoring in "sequential"
+    # mode's library phase.
     source_weights: SourceWeights = Field(default_factory=SourceWeights)
+
+    # "merge" (default): both the list and library collections are ALWAYS
+    # queried together for a semantic question and score-weighted-merged -
+    # today's exact, unchanged behavior for every bot that doesn't set this
+    # field. "sequential": the list side is tried alone first; the library
+    # side is only additionally queried if the model's own judgment (see
+    # app/rag/structured/sequential.py) signals it could not answer from the
+    # list alone. Structured/SQL tools are identical in both modes.
+    retrieval_mode: Literal["merge", "sequential"] = "merge"
 
     @model_validator(mode="after")
     def _valid_sites(self) -> "ListPlusLibraryConfig":
@@ -135,9 +173,14 @@ class SharePointConfig(BaseModel):
     # one list (a library named "Documents" can exist on more than one site).
     sites: list[SharePointSite] = Field(default_factory=list)
 
-    # Column-based publish gate + metadata. Defaults match the agreed columns;
-    # override here if a tenant's internal column names differ. Only documents
-    # whose `status_column` equals `published_value` get indexed.
+    # List-bot-only publish gate: content_type="list" rows are indexed only
+    # when `status_column` equals `published_value` (see sync_job.py's
+    # _is_list_item_published - lenient if the column is simply absent on a
+    # given row). content_type="library" bots do NOT read these two fields -
+    # their Publish Gate is per-site instead (SharePointSite.status_column/
+    # published_value/require_publish_gate above), since two library sites
+    # commonly use two different status schemas and a single bot-wide gate
+    # can't express that.
     status_column: str = "Status"
     published_value: str = "Published"
     category_column: str = "Category"
@@ -253,11 +296,16 @@ class BotConfig(BaseModel):
     # an admin-maintained list of URLs into the same Qdrant vector path a
     # library bot uses - see app/ingestion/web_fetcher.py), or a
     # "List+Library bot" (answers from BOTH a document library AND a
-    # SharePoint List simultaneously - results merged by relevance, no
-    # sequential fallback - see ListPlusLibraryConfig). Never more than one
-    # at once for library/list/web; list+library is the only hybrid type and
-    # carries its own config block (list_plus_library) below.
-    content_type: Literal["library", "list", "web", "list+library"] = "library"
+    # SharePoint List - merged by relevance, or list-first-then-library
+    # fallback, per ListPlusLibraryConfig.retrieval_mode), or a "Chat bot"
+    # (no data source at all - the LLM answers straight from the system
+    # prompt + question, e.g. classification-style questions like "which
+    # category" or "true or false" - never any citations, since nothing is
+    # ever retrieved). Never more than one at once for library/list/web;
+    # list+library is the only hybrid type and carries its own config block
+    # (list_plus_library) below; chat carries none of sharepoint/web/
+    # list_plus_library/vectorstore at all - see _valid_content_source.
+    content_type: Literal["library", "list", "web", "list+library", "chat"] = "library"
     # List bots only: also sync each SharePoint List's rows into its own typed
     # Postgres table (app/db/list_tables.py), alongside the existing Qdrant
     # embedding - similarity search alone can't answer exact counts/filters/
@@ -292,6 +340,29 @@ class BotConfig(BaseModel):
 
     @model_validator(mode="after")
     def _valid_content_source(self) -> "BotConfig":
+        if self.content_type == "chat":
+            if self.sharepoint is not None:
+                raise ValueError(
+                    f"Bot '{self.id}': content_type 'chat' bots have no data "
+                    "source - remove 'sharepoint'."
+                )
+            if self.web is not None:
+                raise ValueError(
+                    f"Bot '{self.id}': content_type 'chat' bots have no data "
+                    "source - remove 'web'."
+                )
+            if self.list_plus_library is not None:
+                raise ValueError(
+                    f"Bot '{self.id}': content_type 'chat' bots have no data "
+                    "source - remove 'list_plus_library'."
+                )
+            if self.vectorstore.collection or self.vectorstore.library_collection or self.vectorstore.list_collection:
+                raise ValueError(
+                    f"Bot '{self.id}': content_type 'chat' bots have no Qdrant "
+                    "collection - remove 'vectorstore' fields."
+                )
+            return self
+
         if self.content_type == "web":
             if self.web is None:
                 raise ValueError(
