@@ -5,6 +5,7 @@ built frontends as static files on this same port/process.
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -30,6 +31,27 @@ def create_app() -> FastAPI:
     s = get_settings()
     app = FastAPI(title=s.app_name, lifespan=lifespan)
     app.add_exception_handler(AppError, app_error_handler)
+
+    # Cross-origin API access (e.g. an SPFx web part on a SharePoint origin
+    # calling /api/ask/* directly with a user's own Entra token) - see
+    # docs/SPFX_API_ACCESS.md. Only added at all when cors_allowed_origins is
+    # actually configured, so the empty/default case has NO CORSMiddleware in
+    # the stack whatsoever - today's same-origin-only behavior for bot-ui/
+    # admin-portal is byte-for-byte unchanged, not just "an empty allow-list".
+    # This only governs which origins the BROWSER lets read the response; the
+    # token validation (app/core/security.py) and per-user chat_logs/
+    # usage_logs stamping (app/api/routes/ask.py) are identical regardless of
+    # the caller's origin - a cross-origin caller goes through the exact same
+    # get_current_user() path as bot-ui.
+    cors_origins = s.cors_allowed_origins_list()
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type"],
+        )
 
     # API first - prefix="/api" composes with admin.router's own internal
     # prefix="/admin" into /api/admin/..., exactly what both frontends already

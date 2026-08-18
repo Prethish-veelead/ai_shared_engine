@@ -68,9 +68,22 @@ class Settings(BaseSettings):
     auth_tenant: str = "veelead-development"  # which tenant's users may sign in
     dev_user_groups: str = ""                 # comma-sep groups for the bypass dev user
 
+    # --- Cross-origin API access (e.g. an SPFx web part on a SharePoint
+    # origin calling /api/ask/* directly) - see docs/SPFX_API_ACCESS.md.
+    # Comma-separated origins, e.g. "https://contoso.sharepoint.com". Empty
+    # (the default) means NO CORSMiddleware is added at all - today's exact
+    # same-origin-only behavior for bot-ui/admin-portal, unchanged. This is
+    # purely about which browser origins may read the response; it has no
+    # effect on token validation or identity/logging - those are unchanged
+    # regardless of the caller's origin.
+    cors_allowed_origins: str = ""
+
     def auth_env_prefix(self) -> str:
         """`veelead-development` -> `VEELEAD_DEVELOPMENT` (matches .env names)."""
         return self.auth_tenant.strip().upper().replace("-", "_").replace(" ", "_")
+
+    def cors_allowed_origins_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
 
     @property
     def bots_dir(self) -> Path:
